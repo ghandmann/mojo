@@ -24,6 +24,13 @@ any '/' => sub {
   $validation->optional('yada')->two;
 } => 'index';
 
+any '/csrf' => sub {
+  my $self       = shift;
+  my $validation = $self->validation->csrf_protect;
+  return $self->render unless $validation->has_data;
+  $validation->required('foo');
+};
+
 my $t = Test::Mojo->new;
 
 # Required and optional values
@@ -152,6 +159,20 @@ $t->post_ok('/' => form => {foo => 'no'})->status_is(200)
   ->element_exists_not('select.field-with-error')
   ->element_exists_not('input.field-with-error[type="password"]');
 
+# Missing CSRF token
+$t->post_ok('/csrf?foo=bar')->status_is(200)
+  ->content_like(qr/Wrong or missing CSRF token!/);
+
+# Correct CSRF token
+my $token = $t->ua->get('/csrf')->res->dom->at('[name=csrf_token]')->{value};
+$t->post_ok('/csrf' => form => {csrf_token => $token, foo => 'bar'})
+  ->status_is(200)->content_unlike(qr/Wrong or missing CSRF token!/)
+  ->element_exists('[value=bar]');
+
+# Missing CSRF token again
+$t->post_ok('/csrf?foo=bar')->status_is(200)
+  ->content_like(qr/Wrong or missing CSRF token!/);
+
 # Failed validation for all fields (with custom helper)
 $t->app->helper(
   tag_with_error => sub {
@@ -192,3 +213,9 @@ __DATA__
   %= select_field baz => [qw(yada yada)]
   %= password_field 'yada'
 % end
+
+@@ csrf.html.ep
+%= form_for csrf => begin
+  %= 'Wrong or missing CSRF token!' if validation->has_error('csrf_token')
+  %= text_field 'foo'
+%= end

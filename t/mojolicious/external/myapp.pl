@@ -8,6 +8,9 @@ app->defaults(secret => 'Insecure!');
 # Load plugin
 plugin 'Config';
 
+# No CSRF token for forms
+helper csrf_field => sub {''};
+
 # Message condition
 app->routes->add_condition(
   message => sub {

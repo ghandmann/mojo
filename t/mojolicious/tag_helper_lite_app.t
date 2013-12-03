@@ -9,6 +9,9 @@ use Test::More;
 use Mojolicious::Lite;
 use Test::Mojo;
 
+# No CSRF token for forms
+helper csrf_field => sub {''};
+
 options 'tags';
 
 patch 'more_tags';

@@ -15,6 +15,7 @@ sub register {
 
   $app->helper(check_box =>
       sub { _input(shift, shift, value => shift, @_, type => 'checkbox') });
+  $app->helper(csrf_field => \&_csrf_field);
   $app->helper(file_field =>
       sub { shift; _tag('input', name => shift, @_, type => 'file') });
 
@@ -41,6 +42,11 @@ sub register {
   $app->helper(text_area      => \&_text_area);
 }
 
+sub _csrf_field {
+  my $self = shift;
+  return $self->hidden_field(csrf_token => $self->csrf_token, @_);
+}
+
 sub _form_for {
   my ($self, @url) = (shift, shift);
   push @url, shift if ref $_[0] eq 'HASH';
@@ -56,7 +62,9 @@ sub _form_for {
     @post = (method => 'POST') if $methods{POST} && !$methods{GET};
   }
 
-  return _tag('form', action => $self->url_for(@url), @post, @_);
+  my $content = $self->csrf_field . pop->();
+  return _tag('form', action => $self->url_for(@url), @post, @_,
+    sub {$content});
 }
 
 sub _hidden_field {
@@ -304,6 +312,14 @@ picked up and shown as default.
   <input name="background" type="color" value="#ffffff" />
   <input id="foo" name="background" type="color" value="#ffffff" />
 
+=head2 csrf_field
+
+  %= csrf_field
+
+Generate hidden input element with CSRF token.
+
+  <input name="csrf_token" type="hidden" value="fa6a08..." />
+
 =head2 date_field
 
   %= date_field 'end'
@@ -372,23 +388,27 @@ Generate file input element.
     %= submit_button
   % end
 
-Generate portable form tag with L<Mojolicious::Controller/"url_for">. For
-routes that allow POST but not GET, a C<method> attribute will be
-automatically added.
+Generate portable form tag with L<Mojolicious::Controller/"url_for"> and
+L</"csrf_field">. For routes that allow POST but not GET, a C<method>
+attribute will be automatically added.
 
   <form action="/path/to/login">
+    <input name="csrf_token" type="hidden" value="fa6a08..." />
     <input name="first_name" />
     <input value="Ok" type="submit" />
   </form>
   <form action="/path/to/login.txt" method="POST">
+    <input name="csrf_token" type="hidden" value="fa6a08..." />
     <input name="first_name" />
     <input value="Ok" type="submit" />
   </form>
   <form action="/path/to/login" method="POST">
+    <input name="csrf_token" type="hidden" value="fa6a08..." />
     <input name="first_name" />
     <input value="Ok" type="submit" />
   </form>
   <form action="http://example.com/login" method="POST">
+    <input name="csrf_token" type="hidden" value="fa6a08..." />
     <input name="first_name" />
     <input value="Ok" type="submit" />
   </form>
