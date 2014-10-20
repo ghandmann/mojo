@@ -10,8 +10,6 @@ has quote_start    => '(';
 has relaxed_start  => '#';
 has wildcard_start => '*';
 
-sub new { shift->SUPER::new->parse(@_) }
-
 sub match {
   my ($self, $path, $detect) = @_;
   my $captures = $self->match_partial(\$path, $detect);
@@ -22,12 +20,11 @@ sub match_partial {
   my ($self, $pathref, $detect) = @_;
 
   # Compile on demand
-  my $regex = $self->regex || $self->_compile;
-  my $format
-    = $detect ? ($self->format_regex || $self->_compile_format) : undef;
+  $self->_compile unless $self->{regex};
+  $self->_compile_format if $detect && !$self->{format_regex};
 
   # Match
-  return undef unless my @captures = $$pathref =~ $regex;
+  return undef unless my @captures = $$pathref =~ $self->regex;
   $$pathref = ${^POSTMATCH};
 
   # Merge captures
@@ -39,136 +36,124 @@ sub match_partial {
   }
 
   # Format
-  my $constraint = $self->constraints->{format};
-  return $captures if !$detect || defined $constraint && !$constraint;
-  if ($$pathref =~ s!^/?$format!!) { $captures->{format} = $1 }
-  elsif ($constraint) { return undef unless $captures->{format} }
-
+  return $captures unless $detect && (my $regex = $self->format_regex);
+  return undef unless $$pathref =~ $regex;
+  $captures->{format} = $1 if defined $1;
+  $$pathref = '';
   return $captures;
 }
+
+sub new { @_ > 1 ? shift->SUPER::new->parse(@_) : shift->SUPER::new }
 
 sub parse {
   my $self = shift;
 
-  # Make sure we have a viable pattern
-  my $pattern = @_ % 2 ? (shift || '/') : '/';
-  $pattern = "/$pattern" unless $pattern =~ m!^/!;
-  $self->constraints({@_});
+  my $pattern = @_ % 2 ? (shift // '/') : '/';
+  $pattern =~ s!^/*|/+!/!g;
+  return $self->constraints({@_}) if $pattern eq '/';
+  $pattern =~ s!/$!!;
 
-  return $pattern eq '/' ? $self : $self->pattern($pattern)->_tokenize;
+  return $self->constraints({@_})->_tokenize($pattern);
 }
 
 sub render {
-  my ($self, $values, $render) = @_;
-
-  # Merge values with defaults
-  my $format = ($values ||= {})->{format};
-  $values = {%{$self->defaults}, %$values};
+  my ($self, $values, $endpoint) = @_;
 
   # Placeholders can only be optional without a format
-  my $optional = !$format;
+  my $optional = !(my $format = $values->{format});
 
   my $str = '';
   for my $token (reverse @{$self->tree}) {
-    my $op       = $token->[0];
-    my $rendered = '';
-
-    # Slash
-    if ($op eq 'slash') { $rendered = '/' unless $optional }
+    my ($op, $value) = @$token;
+    my $fragment = '';
 
     # Text
-    elsif ($op eq 'text') {
-      $rendered = $token->[1];
-      $optional = 0;
+    if ($op eq 'text') { ($fragment, $optional) = ($value, 0) }
+
+    # Slash
+    elsif ($op eq 'slash') { $fragment = '/' unless $optional }
+
+    # Placeholder
+    else {
+      my $default = $self->defaults->{$value};
+      $fragment = $values->{$value} // $default // '';
+      if (!defined $default || ($default ne $fragment)) { $optional = 0 }
+      elsif ($optional) { $fragment = '' }
     }
 
-    # Placeholder, relaxed or wildcard
-    elsif ($op eq 'placeholder' || $op eq 'relaxed' || $op eq 'wildcard') {
-      my $name = $token->[1];
-      $rendered = $values->{$name} // '';
-      my $default = $self->defaults->{$name};
-      if (!defined $default || ($default ne $rendered)) { $optional = 0 }
-      elsif ($optional) { $rendered = '' }
-    }
-
-    $str = "$rendered$str";
+    $str = "$fragment$str";
   }
 
-  # Format is optional
-  $str ||= '/';
-  return $render && $format ? "$str.$format" : $str;
+  # Format can be optional
+  return $endpoint && $format ? "$str.$format" : $str;
 }
 
 sub _compile {
   my $self = shift;
 
+  my $placeholders = $self->placeholders;
+  my $constraints  = $self->constraints;
+  my $defaults     = $self->defaults;
+
   my $block = my $regex = '';
-  my $optional    = 1;
-  my $constraints = $self->constraints;
-  my $defaults    = $self->defaults;
+  my $optional = 1;
   for my $token (reverse @{$self->tree}) {
-    my $op       = $token->[0];
-    my $compiled = '';
+    my ($op, $value) = @$token;
+    my $fragment = '';
+
+    # Text
+    if ($op eq 'text') { ($fragment, $optional) = (quotemeta $value, 0) }
 
     # Slash
-    if ($op eq 'slash') {
+    elsif ($op eq 'slash') {
       $regex = ($optional ? "(?:/$block)?" : "/$block") . $regex;
-      $block = '';
+      ($block, $optional) = ('', 1);
       next;
     }
 
-    # Text
-    elsif ($op eq 'text') {
-      $compiled = quotemeta $token->[1];
-      $optional = 0;
-    }
-
     # Placeholder
-    elsif ($op eq 'placeholder' || $op eq 'relaxed' || $op eq 'wildcard') {
-      my $name = $token->[1];
-      unshift @{$self->placeholders}, $name;
+    else {
+      unshift @$placeholders, $value;
 
       # Placeholder
-      if ($op eq 'placeholder') { $compiled = '([^\/\.]+)' }
+      if ($op eq 'placeholder') { $fragment = '([^/\.]+)' }
 
       # Relaxed
-      elsif ($op eq 'relaxed') { $compiled = '([^\/]+)' }
+      elsif ($op eq 'relaxed') { $fragment = '([^/]+)' }
 
       # Wildcard
-      elsif ($op eq 'wildcard') { $compiled = '(.+)' }
+      else { $fragment = '(.+)' }
 
       # Custom regex
-      my $constraint = $constraints->{$name};
-      $compiled = _compile_req($constraint) if $constraint;
+      if (my $c = $constraints->{$value}) { $fragment = _compile_req($c) }
 
       # Optional placeholder
-      $optional = 0 unless exists $defaults->{$name};
-      $compiled .= '?' if $optional;
+      exists $defaults->{$value} ? ($fragment .= '?') : ($optional = 0);
     }
 
-    $block = "$compiled$block";
+    $block = "$fragment$block";
   }
 
   # Not rooted with a slash
   $regex = "$block$regex" if $block;
 
-  return $self->regex(qr/^$regex/ps)->regex;
+  $self->regex(qr/^$regex/ps);
 }
 
 sub _compile_format {
   my $self = shift;
 
   # Default regex
-  my $c = $self->constraints;
-  return $self->format_regex(qr!\.([^/]+)$!)->format_regex
-    unless defined $c->{format};
+  my $format = $self->constraints->{format};
+  return $self->format_regex(qr!^/?(?:\.([^/]+))?$!) unless defined $format;
 
   # No regex
-  return undef unless $c->{format};
+  return undef unless $format;
 
   # Compile custom regex
-  my $regex = _compile_req($c->{format});
-  return $self->format_regex(qr!\.$regex$!)->format_regex;
+  my $regex = '\.' . _compile_req($format);
+  $regex = "(?:$regex)?" if $self->defaults->{format};
+  $self->format_regex(qr!^/?$regex$!);
 }
 
 sub _compile_req {
@@ -178,7 +163,7 @@ sub _compile_req {
 }
 
 sub _tokenize {
-  my $self = shift;
+  my ($self, $pattern) = @_;
 
   my $quote_end   = $self->quote_end;
   my $quote_start = $self->quote_start;
@@ -186,55 +171,48 @@ sub _tokenize {
   my $relaxed     = $self->relaxed_start;
   my $wildcard    = $self->wildcard_start;
 
-  my $pattern = $self->pattern;
-  my $state   = 'text';
-  my (@tree, $quoted);
+  my (@tree, $inside, $quoted);
   for my $char (split '', $pattern) {
-    my $inside = !!grep { $_ eq $state } qw(placeholder relaxed wildcard);
 
     # Quote start
     if ($char eq $quote_start) {
-      $quoted = 1;
       push @tree, ['placeholder', ''];
-      $state = 'placeholder';
+      ($inside, $quoted) = (1, 1);
     }
 
     # Placeholder start
     elsif ($char eq $placeholder) {
-      push @tree, ['placeholder', ''] if $state ne 'placeholder';
-      $state = 'placeholder';
+      push @tree, ['placeholder', ''] unless $inside++;
     }
 
     # Relaxed or wildcard start (upgrade when quoted)
     elsif ($char eq $relaxed || $char eq $wildcard) {
       push @tree, ['placeholder', ''] unless $quoted;
-      $tree[-1][0] = $state = $char eq $relaxed ? 'relaxed' : 'wildcard';
+      $tree[-1][0] = $char eq $relaxed ? 'relaxed' : 'wildcard';
+      $inside = 1;
     }
 
     # Quote end
-    elsif ($char eq $quote_end) {
-      $quoted = 0;
-      $state  = 'text';
-    }
+    elsif ($char eq $quote_end) { ($inside, $quoted) = (0, 0) }
 
-    # Slash
+    # Slash (first slash is text for optimizations)
     elsif ($char eq '/') {
-      push @tree, ['slash'];
-      $state = 'text';
+      push @tree, @tree ? ['slash'] : ['text', '/'];
+      $inside = 0;
     }
 
     # Placeholder, relaxed or wildcard
-    elsif ($inside && $char =~ /\w/) { $tree[-1][-1] .= $char }
+    elsif ($inside) { $tree[-1][-1] .= $char }
 
-    # Text
-    else {
-      push @tree, ['text', $char] and next unless $tree[-1][0] eq 'text';
-      $tree[-1][-1] .= $char;
-      $state = 'text';
+    # Text (optimize text followed by slash followed by text)
+    elsif ($tree[-1][0] eq 'text') { $tree[-1][-1] .= $char }
+    elsif ($tree[-2] && $tree[-2][0] eq 'text' && $tree[-1][0] eq 'slash') {
+      pop @tree && ($tree[-1][-1] .= "/$char");
     }
+    else { push @tree, ['text', $char] }
   }
 
-  return $self->tree(\@tree);
+  return $self->pattern($pattern)->tree(\@tree);
 }
 
 1;
@@ -287,8 +265,8 @@ Compiled regular expression for format matching.
 
 =head2 pattern
 
-  my $pattern = $pattern->pattern;
-  $pattern    = $pattern->pattern('/(foo)/(bar)');
+  my $raw  = $pattern->pattern;
+  $pattern = $pattern->pattern('/(foo)/(bar)');
 
 Raw unparsed pattern.
 
@@ -337,7 +315,7 @@ Character indicating a relaxed placeholder, defaults to C<#>.
 =head2 tree
 
   my $tree = $pattern->tree;
-  $pattern = $pattern->tree([['slash'], ['text', 'foo']]);
+  $pattern = $pattern->tree([['text', '/foo']]);
 
 Pattern in parsed form. Note that this structure should only be used very
 carefully since it is very dynamic.
@@ -354,16 +332,6 @@ Character indicating the start of a wildcard placeholder, defaults to C<*>.
 L<Mojolicious::Routes::Pattern> inherits all methods from L<Mojo::Base> and
 implements the following new ones.
 
-=head2 new
-
-  my $pattern = Mojolicious::Routes::Pattern->new('/:action');
-  my $pattern
-    = Mojolicious::Routes::Pattern->new('/:action', action => qr/\w+/);
-  my $pattern = Mojolicious::Routes::Pattern->new(format => 0);
-
-Construct a new L<Mojolicious::Routes::Pattern> object and L</"parse"> pattern
-if necessary.
-
 =head2 match
 
   my $captures = $pattern->match('/foo/bar');
@@ -378,6 +346,16 @@ Match pattern against entire path, format detection is disabled by default.
 
 Match pattern against path and remove matching parts, format detection is
 disabled by default.
+
+=head2 new
+
+  my $pattern = Mojolicious::Routes::Pattern->new('/:action');
+  my $pattern
+    = Mojolicious::Routes::Pattern->new('/:action', action => qr/\w+/);
+  my $pattern = Mojolicious::Routes::Pattern->new(format => 0);
+
+Construct a new L<Mojolicious::Routes::Pattern> object and L</"parse"> pattern
+if necessary.
 
 =head2 parse
 

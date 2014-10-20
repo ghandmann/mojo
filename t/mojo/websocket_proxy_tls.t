@@ -10,7 +10,7 @@ use Mojo::IOLoop::Server;
 
 plan skip_all => 'set TEST_TLS to enable this test (developer only!)'
   unless $ENV{TEST_TLS};
-plan skip_all => 'IO::Socket::SSL 1.75 required for this test!'
+plan skip_all => 'IO::Socket::SSL 1.84 required for this test!'
   unless Mojo::IOLoop::Server::TLS;
 
 use Mojo::IOLoop;
@@ -22,55 +22,54 @@ use Mojolicious::Lite;
 app->log->level('fatal');
 
 get '/' => sub {
-  my $self = shift;
-  $self->res->headers->header('X-Works',
-    $self->req->headers->header('X-Works'));
-  my $rel = $self->req->url;
+  my $c = shift;
+  $c->res->headers->header('X-Works',
+    $c->req->headers->header('X-Works') // '');
+  my $rel = $c->req->url;
   my $abs = $rel->to_abs;
-  $self->render(text => "Hello World! $rel $abs");
+  $c->render(text => "Hello World! $rel $abs");
 };
 
 get '/broken_redirect' => sub {
-  my $self = shift;
-  $self->render(text => 'Redirecting!', status => 302);
-  $self->res->headers->location('/');
+  my $c = shift;
+  $c->render(text => 'Redirecting!', status => 302);
+  $c->res->headers->location('/');
 };
 
 get '/proxy' => sub {
-  my $self = shift;
-  $self->render(text => $self->req->url->to_abs);
+  my $c = shift;
+  $c->render(text => $c->req->url->to_abs);
 };
 
 websocket '/test' => sub {
-  my $self = shift;
-  $self->on(
+  my $c = shift;
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send("${msg}test2");
+      my ($c, $msg) = @_;
+      $c->send("${msg}test2");
     }
   );
 };
 
 # Web server with valid certificates
 my $daemon = Mojo::Server::Daemon->new(app => app, silent => 1);
-my $port = Mojo::IOLoop->new->generate_port;
 my $listen
-  = "https://127.0.0.1:$port"
+  = 'https://127.0.0.1'
   . '?cert=t/mojo/certs/server.crt'
   . '&key=t/mojo/certs/server.key'
   . '&ca=t/mojo/certs/ca.crt';
 $daemon->listen([$listen])->start;
+my $port = Mojo::IOLoop->acceptor($daemon->acceptors->[0])->handle->sockport;
 
 # Connect proxy server for testing
-my $proxy = Mojo::IOLoop->generate_port;
 my (%buffer, $connected, $read, $sent);
 my $nf
   = "HTTP/1.1 501 FOO\x0d\x0a"
   . "Content-Length: 0\x0d\x0a"
   . "Connection: close\x0d\x0a\x0d\x0a";
-my $ok = "HTTP/1.0 201 BAR\x0d\x0aX-Something: unimportant\x0d\x0a\x0d\x0a";
-Mojo::IOLoop->server(
-  {address => '127.0.0.1', port => $proxy} => sub {
+my $ok = "HTTP/1.1 200 OK\x0d\x0aConnection: keep-alive\x0d\x0a\x0d\x0a";
+my $id = Mojo::IOLoop->server(
+  {address => '127.0.0.1'} => sub {
     my ($loop, $stream, $client) = @_;
 
     # Connection to client
@@ -138,6 +137,20 @@ Mojo::IOLoop->server(
     );
   }
 );
+my $proxy = Mojo::IOLoop->acceptor($id)->handle->sockport;
+
+# Fake server to test failed TLS handshake
+$id = Mojo::IOLoop->server(
+  sub {
+    my ($loop, $stream) = @_;
+    $stream->on(read => sub { shift->close });
+  }
+);
+my $close = Mojo::IOLoop->acceptor($id)->handle->sockport;
+
+# Fake server to test idle connection
+$id = Mojo::IOLoop->server(sub { });
+my $idle = Mojo::IOLoop->acceptor($id)->handle->sockport;
 
 # User agent with valid certificates
 my $ua = Mojo::UserAgent->new(
@@ -272,16 +285,26 @@ $ua->websocket(
   "wss://localhost:$port2/test" => sub {
     my ($ua, $tx) = @_;
     $success = $tx->success;
-    $err     = $tx->error;
+    $err     = $tx->res->error;
     Mojo::IOLoop->stop;
   }
 );
 Mojo::IOLoop->start;
 ok !$success, 'no success';
-is $err, 'Proxy connection failed', 'right message';
+is $err->{message}, 'Proxy connection failed', 'right error';
+
+# Failed TLS handshake through proxy
+$tx = $ua->get("https://localhost:$close");
+is $err->{message}, 'Proxy connection failed', 'right error';
+
+# Idle connection through proxy
+$ua->on(start =>
+    sub { shift->connect_timeout(0.25) if pop->req->method eq 'CONNECT' });
+$tx = $ua->get("https://localhost:$idle");
+is $err->{message}, 'Proxy connection failed', 'right error';
+$ua->connect_timeout(10);
 
 # Blocking proxy request again
-$ua->proxy->https("http://localhost:$proxy");
 $tx = $ua->get("https://localhost:$port/proxy");
 is $tx->res->code, 200, 'right status';
 is $tx->res->body, "https://localhost:$port/proxy", 'right content';

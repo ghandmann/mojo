@@ -6,7 +6,9 @@ BEGIN {
 }
 
 use Test::More;
+use Cwd 'abs_path';
 use File::Spec::Functions 'catdir';
+use FindBin;
 use Mojo;
 use Mojo::IOLoop;
 use Mojo::Log;
@@ -38,6 +40,13 @@ use Mojolicious;
   );
 }
 
+# Reverse proxy
+{
+  ok !Mojo::Server::Daemon->new->reverse_proxy, 'no reverse proxy';
+  local $ENV{MOJO_REVERSE_PROXY} = 1;
+  ok !!Mojo::Server::Daemon->new->reverse_proxy, 'reverse proxy';
+}
+
 # Optional home detection
 my @path = qw(th is mojo dir wil l never-ever exist);
 my $app = Mojo->new(home => Mojo::Home->new(catdir @path));
@@ -50,9 +59,26 @@ is $app->config('foo'), 'bar', 'right value';
 delete $app->config->{foo};
 is $app->config('foo'), undef, 'no value';
 $app->config(foo => 'bar', baz => 'yada');
-is_deeply $app->config, {foo => 'bar', baz => 'yada'}, 'right value';
-$app->config({test => 23});
-is $app->config->{test}, 23, 'right value';
+is $app->config({test => 23})->config->{test}, 23, 'right value';
+is_deeply $app->config, {foo => 'bar', baz => 'yada', test => 23},
+  'right value';
+
+# Script name
+my $path = "$FindBin::Bin/lib/../lib/myapp.pl";
+is(Mojo::Server::Daemon->new->load_app($path)->config('script'),
+  abs_path($path), 'right script name');
+
+# Load broken app
+eval {
+  Mojo::Server::Daemon->new->load_app(
+    "$FindBin::Bin/lib/Mojo/LoaderException.pm");
+};
+like $@, qr/^Can't load application/, 'right error';
+
+# Load missing application class
+eval { Mojo::Server::Daemon->new->build_app('Mojo::DoesNotExist') };
+like $@, qr/^Can't find application class "Mojo::DoesNotExist" in \@INC/,
+  'right error';
 
 # Transaction
 isa_ok $app->build_tx, 'Mojo::Transaction::HTTP', 'right class';
@@ -110,7 +136,7 @@ ok $tx->kept_alive, 'was kept alive';
 is $tx->res->code, 200,         'right status';
 is $tx->res->body, 'Whatever!', 'right content';
 
-# Non keep-alive request
+# Non-keep-alive request
 $tx = $ua->get('/close/' => {Connection => 'close'});
 ok !$tx->keep_alive, 'will not be kept alive';
 ok $tx->kept_alive, 'was kept alive';
@@ -118,7 +144,7 @@ is $tx->res->code, 200, 'right status';
 is $tx->res->headers->connection, 'close', 'right "Connection" value';
 is $tx->res->body, 'Whatever!', 'right content';
 
-# Second non keep-alive request
+# Second non-keep-alive request
 $tx = $ua->get('/close/' => {Connection => 'close'});
 ok !$tx->keep_alive, 'will not be kept alive';
 ok !$tx->kept_alive, 'was not kept alive';
@@ -142,13 +168,14 @@ ok defined $tx->connection, 'has connection id';
 is $tx->res->code, 200,         'right status';
 is $tx->res->body, 'Whatever!', 'right content';
 
-# Parallel requests
-my $delay = Mojo::IOLoop->delay;
-$ua->get('/parallel1/' => $delay->begin);
-$ua->post(
-  '/parallel2/' => {Expect => 'fun'} => 'bar baz foo' x 128 => $delay->begin);
-$ua->get('/parallel3/' => $delay->begin);
-($tx, my $tx2, my $tx3) = $delay->wait;
+# Concurrent requests
+my ($tx2, $tx3);
+my $delay = Mojo::IOLoop->delay(sub { (undef, $tx, $tx2, $tx3) = @_ });
+$ua->get('/concurrent1/' => $delay->begin);
+$ua->post('/concurrent2/' => {Expect => 'fun'} => 'bar baz foo' x 128 =>
+    $delay->begin);
+$ua->get('/concurrent3/' => $delay->begin);
+$delay->wait;
 ok $tx->is_finished, 'transaction is finished';
 is $tx->res->body, 'Whatever!', 'right content';
 ok !$tx->error, 'no error';
@@ -178,18 +205,19 @@ is $tx->res->code, 200, 'right status';
 is $tx->res->body, $result, 'right content';
 ok $tx->local_address, 'has local address';
 ok $tx->local_port > 0, 'has local port';
-ok $tx->remote_address, 'has local address';
-ok $tx->remote_port > 0, 'has local port';
+ok $tx->original_remote_address, 'has original remote address';
+ok $tx->remote_address,          'has remote address';
+ok $tx->remote_port > 0, 'has remote port';
 ok $local_address, 'has local address';
 ok $local_port > 0, 'has local port';
-ok $remote_address, 'has local address';
-ok $remote_port > 0, 'has local port';
+ok $remote_address, 'has remote address';
+ok $remote_port > 0, 'has remote port';
 
 # Pipelined
-$port = Mojo::IOLoop->generate_port;
-my $daemon = Mojo::Server::Daemon->new(listen => ["http://127.0.0.1:$port"],
-  silent => 1);
+my $daemon
+  = Mojo::Server::Daemon->new(listen => ['http://127.0.0.1'], silent => 1);
 $daemon->start;
+$port = Mojo::IOLoop->acceptor($daemon->acceptors->[0])->handle->sockport;
 is $daemon->app->moniker, 'HelloWorld', 'right moniker';
 my $buffer = '';
 my $id;
@@ -214,16 +242,18 @@ Mojo::IOLoop->start;
 like $buffer, qr/Mojo$/, 'transactions were pipelined';
 
 # Throttling
-$port   = Mojo::IOLoop->generate_port;
 $daemon = Mojo::Server::Daemon->new(
   app    => $app,
-  listen => ["http://127.0.0.1:$port"],
+  listen => ['http://127.0.0.1'],
   silent => 1
 );
 is scalar @{$daemon->acceptors}, 0, 'no active acceptors';
+$daemon->ioloop->max_connections(500);
 $daemon->start;
+is $daemon->ioloop->max_connections, 500, 'right number';
 is scalar @{$daemon->acceptors}, 1, 'one active acceptor';
 is $daemon->app->moniker, 'mojolicious', 'right moniker';
+$port = Mojo::IOLoop->acceptor($daemon->acceptors->[0])->handle->sockport;
 $tx = $ua->get("http://127.0.0.1:$port/throttle1" => {Connection => 'close'});
 ok $tx->success, 'successful';
 is $tx->res->code, 200,         'right status';
@@ -233,8 +263,9 @@ is scalar @{$daemon->acceptors}, 0, 'no active acceptors';
 $tx = $ua->inactivity_timeout(0.5)
   ->get("http://127.0.0.1:$port/throttle2" => {Connection => 'close'});
 ok !$tx->success, 'not successful';
-is $tx->error, 'Inactivity timeout', 'right error';
-$daemon->start;
+is $tx->error->{message}, 'Inactivity timeout', 'right error';
+$daemon->max_clients(600)->start;
+is $daemon->ioloop->max_connections, 600, 'right number';
 $tx = $ua->inactivity_timeout(10)
   ->get("http://127.0.0.1:$port/throttle3" => {Connection => 'close'});
 ok $tx->success, 'successful';

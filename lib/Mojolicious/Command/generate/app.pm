@@ -3,8 +3,8 @@ use Mojo::Base 'Mojolicious::Command';
 
 use Mojo::Util qw(class_to_file class_to_path);
 
-has description => "Generate Mojolicious application directory structure.\n";
-has usage       => "usage: $0 generate app [NAME]\n";
+has description => 'Generate Mojolicious application directory structure.';
+has usage => sub { shift->extract_usage };
 
 sub run {
   my ($self, $class) = @_;
@@ -19,14 +19,14 @@ EOF
   # Script
   my $name = class_to_file $class;
   $self->render_to_rel_file('mojo', "$name/script/$name", $class);
-  $self->chmod_file("$name/script/$name", 0744);
+  $self->chmod_rel_file("$name/script/$name", 0744);
 
   # Application class
   my $app = class_to_path $class;
   $self->render_to_rel_file('appclass', "$name/lib/$app", $class);
 
   # Controller
-  my $controller = "${class}::Example";
+  my $controller = "${class}::Controller::Example";
   my $path       = class_to_path $controller;
   $self->render_to_rel_file('controller', "$name/lib/$path", $controller);
 
@@ -150,10 +150,7 @@ Mojolicious::Command::generate::app - App generator command
 
 =head1 SYNOPSIS
 
-  use Mojolicious::Command::generate::app;
-
-  my $app = Mojolicious::Command::generate::app->new;
-  $app->run(@ARGV);
+  Usage: APPLICATION generate app [NAME]
 
 =head1 DESCRIPTION
 
@@ -162,6 +159,9 @@ structures for fully functional L<Mojolicious> applications.
 
 This is a core command, that means it is always enabled and its code a good
 example for learning to build new commands, you're welcome to fork it.
+
+See L<Mojolicious::Commands/"COMMANDS"> for a list of commands that are
+available by default.
 
 =head1 ATTRIBUTES
 

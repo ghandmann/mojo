@@ -7,32 +7,38 @@ BEGIN {
 
 use Test::More;
 use Mojo::ByteStream 'b';
-use Mojo::JSON 'j';
+use Mojo::JSON 'encode_json';
 use Mojolicious::Lite;
 use Test::Mojo;
 
 websocket '/echo' => sub {
-  my $self = shift;
-  $self->tx->max_websocket_size(262145);
-  $self->on(binary => sub { shift->send({binary => shift}) });
-  $self->on(
+  my $c = shift;
+  $c->tx->max_websocket_size(262145)->with_compression;
+  $c->on(binary => sub { shift->send({binary => shift}) });
+  $c->on(
     text => sub {
-      my ($self, $bytes) = @_;
-      $self->send("echo: $bytes");
+      my ($c, $bytes) = @_;
+      $c->send("echo: $bytes");
     }
   );
 };
 
 get '/echo' => {text => 'plain echo!'};
 
+websocket '/no_compression' => sub {
+  my $c = shift;
+  $c->on(binary => sub { shift->send({binary => shift}) });
+};
+
 websocket '/json' => sub {
-  my $self = shift;
-  $self->on(
+  my $c = shift;
+  $c->on(
     json => sub {
-      my ($self, $json) = @_;
-      return $self->send({json => [@$json, 4]}) if ref $json eq 'ARRAY';
+      my ($c, $json) = @_;
+      return $c->send({json => $json}) unless ref $json;
+      return $c->send({json => [@$json, 4]}) if ref $json eq 'ARRAY';
       $json->{test} += 1;
-      $self->send({json => $json});
+      $c->send({json => $json});
     }
   );
 };
@@ -40,39 +46,24 @@ websocket '/json' => sub {
 get '/plain' => {text => 'Nothing to see here!'};
 
 websocket '/push' => sub {
-  my $self = shift;
-  my $id = Mojo::IOLoop->recurring(0.1 => sub { $self->send('push') });
-  $self->on(finish => sub { Mojo::IOLoop->remove($id) });
+  my $c = shift;
+  my $id = Mojo::IOLoop->recurring(0.1 => sub { $c->send('push') });
+  $c->on(finish => sub { Mojo::IOLoop->remove($id) });
 };
 
 websocket '/unicode' => sub {
-  my $self = shift;
-  $self->on(
+  my $c = shift;
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send("♥: $msg");
+      my ($c, $msg) = @_;
+      $c->send("♥: $msg");
     }
   );
 };
 
-websocket '/no_context_takeover' => sub {
-  my $self = shift;
-  $self->tx->context_takeover(0);
-  $self->res->headers->sec_websocket_extensions(
-    'permessage-deflate;client_no_context_takeover');
-  $self->on(binary => sub { shift->send({binary => shift}) });
-};
-
-websocket '/no_compression' => sub {
-  my $self = shift;
-  $self->tx->compressed(0);
-  $self->res->headers->remove('Sec-WebSocket-Extensions');
-  $self->on(binary => sub { shift->send({binary => shift}) });
-};
-
 websocket '/bytes' => sub {
-  my $self = shift;
-  $self->on(
+  my $c = shift;
+  $c->on(
     frame => sub {
       my ($ws, $frame) = @_;
       $ws->send({$frame->[4] == 2 ? 'binary' : 'text', $frame->[5]});
@@ -81,17 +72,17 @@ websocket '/bytes' => sub {
 };
 
 websocket '/once' => sub {
-  my $self = shift;
-  $self->on(
+  my $c = shift;
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send("ONE: $msg");
+      my ($c, $msg) = @_;
+      $c->send("ONE: $msg");
     }
   );
-  $self->tx->once(
+  $c->tx->once(
     message => sub {
       my ($tx, $msg) = @_;
-      $self->send("TWO: $msg");
+      $c->send("TWO: $msg");
     }
   );
 };
@@ -99,13 +90,13 @@ websocket '/once' => sub {
 under '/nested';
 
 websocket sub {
-  my $self = shift;
-  my $echo = $self->cookie('echo') // '';
-  $self->cookie(echo => 'again');
-  $self->on(
+  my $c = shift;
+  my $echo = $c->cookie('echo') // '';
+  $c->cookie(echo => 'again');
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send("nested echo: $msg$echo")->finish(1000);
+      my ($c, $msg) = @_;
+      $c->send("nested echo: $msg$echo")->finish(1000);
     }
   );
 };
@@ -135,35 +126,54 @@ is $t->tx->req->headers->dnt, 1, 'right "DNT" value';
 is $t->tx->req->headers->sec_websocket_protocol, 'foo, bar, baz',
   'right "Sec-WebSocket-Protocol" value';
 
-# Bytes with compression (offer "client_no_context_takeover")
-my $extensions = 'permessage-deflate;client_no_context_takeover';
-$t->websocket_ok('/echo' => {'Sec-WebSocket-Extensions' => $extensions});
-ok $t->tx->compressed,       'WebSocket has compression';
-ok $t->tx->context_takeover, 'with context takeover';
-$t->send_ok({binary => 'bytes!'})
+# Bytes
+$t->websocket_ok('/echo')->send_ok({binary => 'bytes!'})
   ->message_ok->message_is({binary => 'bytes!'})
   ->send_ok({binary => 'bytes!'})
   ->message_ok->message_isnt({text => 'bytes!'})->finish_ok;
+
+# Bytes in multiple frames
+$t->websocket_ok('/echo')->send_ok([0, 0, 0, 0, 2, 'a'])
+  ->send_ok([0, 0, 0, 0, 0, 'b'])->send_ok([1, 0, 0, 0, 0, 'c'])
+  ->message_ok->message_is({binary => 'abc'})->finish_ok;
 
 # Zero
 $t->websocket_ok('/echo')->send_ok(0)->message_ok->message_is('echo: 0')
   ->send_ok(0)->message_ok->message_like({text => qr/0/})->finish_ok(1000)
   ->finished_ok(1000);
 
-# 64bit binary message (extended limit and no compression)
-$t->websocket_ok('/echo' => {'Sec-WebSocket-Extensions' => 'nothing'});
+# 64-bit binary message (extended limit)
+$t->request_ok($t->ua->build_websocket_tx('/echo'));
 is $t->tx->max_websocket_size, 262144, 'right size';
 $t->tx->max_websocket_size(262145);
 $t->send_ok({binary => 'a' x 262145})
   ->message_ok->message_is({binary => 'a' x 262145})
   ->finish_ok->finished_ok(1005);
 
-# 64bit binary message (too large and no compression)
-$t->websocket_ok('/echo' => {'Sec-WebSocket-Extensions' => 'nothing'})
-  ->send_ok({binary => 'b' x 262145})->finished_ok(1009);
+# 64-bit binary message (too large)
+$t->websocket_ok('/echo')->send_ok({binary => 'b' x 262145})
+  ->finished_ok(1009);
+
+# Binary message in two 64-bit frames without FIN bit (too large)
+$t->websocket_ok('/echo')->send_ok([0, 0, 0, 0, 2, 'c' x 100000])
+  ->send_ok([0, 0, 0, 0, 0, 'c' x 162146])->finished_ok(1009);
+
+# Plain alternative
+$t->get_ok('/echo')->status_is(200)->content_is('plain echo!');
+
+# Compression denied by the server
+$t->websocket_ok(
+  '/no_compression' => {'Sec-WebSocket-Extensions' => 'permessage-deflate'});
+is $t->tx->req->headers->sec_websocket_extensions, 'permessage-deflate',
+  'right "Sec-WebSocket-Extensions" value';
+ok !$t->tx->compressed, 'WebSocket has no compression';
+$t->send_ok({binary => 'a' x 500})
+  ->message_ok->message_is({binary => 'a' x 500})->finish_ok;
 
 # Compressed message ("permessage-deflate")
-$t->websocket_ok('/echo');
+$t->websocket_ok(
+  '/echo' => {'Sec-WebSocket-Extensions' => 'permessage-deflate'});
+ok $t->tx->compressed, 'WebSocket has compression';
 $t->send_ok({binary => 'a' x 50000})
   ->header_is('Sec-WebSocket-Extensions' => 'permessage-deflate');
 is $t->tx->req->headers->sec_websocket_extensions, 'permessage-deflate',
@@ -179,25 +189,38 @@ $t->message_ok->message_is({binary => 'a' x 50000});
 ok length $payload < 262145, 'message has been compressed';
 $t->finish_ok->finished_ok(1005);
 
-# Binary message in two 64bit frames without FIN bit (too large)
-$t->websocket_ok('/echo')->send_ok([0, 0, 0, 0, 2, 'c' x 100000])
-  ->send_ok([0, 0, 0, 0, 0, 'c' x 162146])->finished_ok(1009);
+# Compressed message exceeding the limit when uncompressed
+$t->websocket_ok(
+  '/echo' => {'Sec-WebSocket-Extensions' => 'permessage-deflate'})
+  ->header_is('Sec-WebSocket-Extensions' => 'permessage-deflate')
+  ->send_ok({binary => 'a' x 1000000})->finished_ok(1009);
 
-# Plain alternative
-$t->get_ok('/echo')->status_is(200)->content_is('plain echo!');
+# Huge message that doesn't compress very well
+my $huge = join '', map { int rand(9) } 1 .. 262144;
+$t->websocket_ok(
+  '/echo' => {'Sec-WebSocket-Extensions' => 'permessage-deflate'})
+  ->send_ok({binary => $huge})->message_ok->message_is({binary => $huge})
+  ->finish_ok;
 
 # JSON roundtrips
 $t->websocket_ok('/json')->send_ok({json => {test => 23, snowman => '☃'}})
   ->message_ok->json_message_is('' => {test => 24, snowman => '☃'})
-  ->json_message_is('' => {test => 24, snowman => '☃'}, 'right content')
+  ->json_message_is('' => {test => 24, snowman => '☃'})
   ->json_message_has('/test')->json_message_hasnt('/test/2')
-  ->send_ok({binary => j([1, 2, 3])})
-  ->message_ok->json_message_is([1, 2, 3, 4])
-  ->json_message_is([1, 2, 3, 4], 'right content')
-  ->send_ok({binary => j([1, 2, 3])})
+  ->send_ok({binary => encode_json([1, 2, 3])})
+  ->message_ok->json_message_is([1, 2, 3, 4])->json_message_is([1, 2, 3, 4])
+  ->send_ok({binary => encode_json([1, 2, 3])})
   ->message_ok->json_message_has('/2', 'has two elements')
-  ->json_message_is('/2' => 3)->json_message_hasnt('/5', 'not five elements')
-  ->finish_ok;
+  ->json_message_is('/2' => 3, 'right value')
+  ->json_message_hasnt('/5', 'not five elements')
+  ->send_ok({json => {'☃' => [1, 2, 3]}})
+  ->message_ok->json_message_is('/☃', [1, 2, 3])
+  ->json_message_like('/☃/1' => qr/\d/)
+  ->json_message_unlike('/☃/1' => qr/[a-z]/)
+  ->json_message_like('/☃/2' => qr/3/, 'right value')
+  ->json_message_unlike('/☃/2' => qr/2/, 'different value')
+  ->send_ok({json => 'works'})->message_ok->json_message_is('works')
+  ->send_ok({json => undef})->message_ok->json_message_is(undef)->finish_ok;
 
 # Plain request
 $t->get_ok('/plain')->status_is(200)->content_is('Nothing to see here!');
@@ -230,28 +253,9 @@ $t->websocket_ok('/unicode')->send_ok('hello again')
   ->send_ok('and one ☃ more time')
   ->message_ok->message_is('♥: and one ☃ more time')->finish_ok;
 
-# Compression with forced "client_no_context_takeover"
-$t->websocket_ok('/no_context_takeover');
-ok $t->tx->compressed, 'WebSocket has compression';
-ok !$t->tx->context_takeover, 'no context takeover';
-$t->send_ok({binary => 'a' x 500})
-  ->message_ok->message_is({binary => 'a' x 500})
-  ->send_ok({binary => 'a' x 500})
-  ->message_ok->message_is({binary => 'a' x 500})->finish_ok;
-
-# Compression denied by the server
-$t->websocket_ok('/no_compression');
-is $t->tx->req->headers->sec_websocket_extensions, 'permessage-deflate',
-  'right "Sec-WebSocket-Extensions" value';
-ok !$t->tx->compressed, 'WebSocket has no compression';
-$t->send_ok({binary => 'a' x 500})
-  ->message_ok->message_is({binary => 'a' x 500})->finish_ok;
-
-# Binary frame and events (no compression)
+# Binary frame and events
 my $bytes = b("I ♥ Mojolicious")->encode('UTF-16LE')->to_string;
-$t->websocket_ok('/bytes' => {'Sec-WebSocket-Extensions' => 'nothing'})
-  ->header_isnt('Sec-WebSocket-Extensions' => 'permessage-deflate');
-ok !$t->tx->compressed, 'WebSocket has no compression';
+$t->websocket_ok('/bytes');
 my $binary;
 $t->tx->on(
   frame => sub {
@@ -269,8 +273,8 @@ ok !$binary, 'received text frame';
 $t->finish_ok(1000 => 'Have a nice day!');
 is_deeply $close, [1000, 'Have a nice day!'], 'right status and message';
 
-# Binary roundtrips (no compression)
-$t->websocket_ok('/bytes' => {'Sec-WebSocket-Extensions' => 'nothing'})
+# Binary roundtrips
+$t->request_ok($t->ua->build_websocket_tx('/bytes'))
   ->send_ok({binary => $bytes})->message_ok->message_is($bytes)
   ->send_ok({binary => $bytes})->message_ok->message_is($bytes)->finish_ok;
 

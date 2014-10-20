@@ -1,52 +1,53 @@
 package ojo;
 use Mojo::Base -strict;
 
+use Benchmark qw(timeit timestr :hireswallclock);
 use Mojo::ByteStream 'b';
 use Mojo::Collection 'c';
 use Mojo::DOM;
 use Mojo::JSON 'j';
-use Mojo::UserAgent;
 use Mojo::Util qw(dumper monkey_patch);
 
 # Silent one-liners
 $ENV{MOJO_LOG_LEVEL} ||= 'fatal';
 
-# Singleton user agent for one-liners
-my $UA = Mojo::UserAgent->new;
-
 sub import {
 
   # Mojolicious::Lite
   my $caller = caller;
-  eval "package $caller; use Mojolicious::Lite;";
-  my $server = $UA->server->app($caller->app);
-  $server->app->hook(around_action => sub { local $_ = $_[1]; $_[0]->() });
+  eval "package $caller; use Mojolicious::Lite; 1" or die $@;
+  my $ua = $caller->app->ua;
+  $ua->server->app->hook(around_action => sub { local $_ = $_[1]; $_[0]->() });
 
-  $UA->max_redirects(10) unless defined $ENV{MOJO_MAX_REDIRECTS};
-  $UA->proxy->detect unless defined $ENV{MOJO_PROXY};
+  $ua->max_redirects(10) unless defined $ENV{MOJO_MAX_REDIRECTS};
+  $ua->proxy->detect unless defined $ENV{MOJO_PROXY};
 
   # The ojo DSL
   monkey_patch $caller,
-    a => sub { $caller->can('any')->(@_) and return $UA->server->app },
+    a => sub { $caller->can('any')->(@_) and return $ua->server->app },
     b => \&b,
     c => \&c,
-    d => sub { _request($UA->build_tx(DELETE  => @_)) },
-    g => sub { _request($UA->build_tx(GET     => @_)) },
-    h => sub { _request($UA->build_tx(HEAD    => @_)) },
+    d => sub { _request($ua, 'DELETE', @_) },
+    g => sub { _request($ua, 'GET',    @_) },
+    h => sub { _request($ua, 'HEAD',   @_) },
     j => \&j,
-    o => sub { _request($UA->build_tx(OPTIONS => @_)) },
-    p => sub { _request($UA->build_tx(POST    => @_)) },
+    n => sub (&@) { say STDERR timestr timeit($_[1] // 1, $_[0]) },
+    o => sub { _request($ua, 'OPTIONS', @_) },
+    p => sub { _request($ua, 'POST',    @_) },
     r => \&dumper,
-    t => sub { _request($UA->build_tx(PATCH   => @_)) },
-    u => sub { _request($UA->build_tx(PUT     => @_)) },
+    t => sub { _request($ua, 'PATCH',   @_) },
+    u => sub { _request($ua, 'PUT',     @_) },
     x => sub { Mojo::DOM->new(@_) };
 }
 
 sub _request {
-  my $tx = $UA->start(@_);
-  my ($err, $code) = $tx->error;
-  warn qq/Problem loading URL "@{[$tx->req->url->to_abs]}". ($err)\n/
-    if $err && !$code;
+  my $ua = shift;
+
+  my $tx  = $ua->start($ua->build_tx(@_));
+  my $err = $tx->error;
+  warn qq/Problem loading URL "@{[$tx->req->url]}": $err->{message}\n/
+    if $err && !$err->{code};
+
   return $tx->res;
 }
 
@@ -66,18 +67,22 @@ ojo - Fun one-liners with Mojo!
 
 A collection of automatically exported functions for fun Perl one-liners. Ten
 redirects will be followed by default, you can change this behavior with the
-MOJO_MAX_REDIRECTS environment variable.
+C<MOJO_MAX_REDIRECTS> environment variable.
 
   $ MOJO_MAX_REDIRECTS=0 perl -Mojo -E 'say g("example.com")->code'
 
 Proxy detection is enabled by default, but you can disable it with the
-MOJO_PROXY environment variable.
+C<MOJO_PROXY> environment variable.
 
   $ MOJO_PROXY=0 perl -Mojo -E 'say g("example.com")->body'
 
+Every L<ojo> one-liner is also a L<Mojolicious::Lite> application.
+
+  $ perl -Mojo -E 'get "/" => {inline => "%= time"}; app->start' get /
+
 =head1 FUNCTIONS
 
-L<ojo> implements the following functions.
+L<ojo> implements the following functions, which are automatically exported.
 
 =head2 a
 
@@ -107,17 +112,17 @@ Turn list into a L<Mojo::Collection> object.
 =head2 d
 
   my $res = d('example.com');
-  my $res = d('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = d('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform DELETE request with L<Mojo::UserAgent/"delete"> and return resulting
-L<Mojo::Message::Response> object.
+Perform C<DELETE> request with L<Mojo::UserAgent/"delete"> and return
+resulting L<Mojo::Message::Response> object.
 
 =head2 g
 
   my $res = g('example.com');
-  my $res = g('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = g('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform GET request with L<Mojo::UserAgent/"get"> and return resulting
+Perform C<GET> request with L<Mojo::UserAgent/"get"> and return resulting
 L<Mojo::Message::Response> object.
 
   $ perl -Mojo -E 'say g("mojolicio.us")->dom("h1, h2, h3")->text'
@@ -125,35 +130,45 @@ L<Mojo::Message::Response> object.
 =head2 h
 
   my $res = h('example.com');
-  my $res = h('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = h('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform HEAD request with L<Mojo::UserAgent/"head"> and return resulting
+Perform C<HEAD> request with L<Mojo::UserAgent/"head"> and return resulting
 L<Mojo::Message::Response> object.
 
 =head2 j
 
+  my $bytes = j([1, 2, 3]);
   my $bytes = j({foo => 'bar'});
-  my $array = j($bytes);
-  my $hash  = j($bytes);
+  my $value = j($bytes);
 
-Encode Perl data structure or decode JSON with L<Mojo::JSON>.
+Encode Perl data structure or decode JSON with L<Mojo::JSON/"j">.
 
   $ perl -Mojo -E 'b(j({hello => "world!"}))->spurt("hello.json")'
+
+=head2 n
+
+  n {...};
+  n {...} 100;
+
+Benchmark block and print the results to C<STDERR>, with an optional number of
+iterations, which defaults to C<1>.
+
+  $ perl -Mojo -E 'n { say g("mojolicio.us")->code }'
 
 =head2 o
 
   my $res = o('example.com');
-  my $res = o('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = o('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform OPTIONS request with L<Mojo::UserAgent/"options"> and return resulting
-L<Mojo::Message::Response> object.
+Perform C<OPTIONS> request with L<Mojo::UserAgent/"options"> and return
+resulting L<Mojo::Message::Response> object.
 
 =head2 p
 
   my $res = p('example.com');
-  my $res = p('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = p('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform POST request with L<Mojo::UserAgent/"post"> and return resulting
+Perform C<POST> request with L<Mojo::UserAgent/"post"> and return resulting
 L<Mojo::Message::Response> object.
 
 =head2 r
@@ -167,17 +182,17 @@ Dump a Perl data structure with L<Mojo::Util/"dumper">.
 =head2 t
 
   my $res = t('example.com');
-  my $res = t('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = t('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform PATCH request with L<Mojo::UserAgent/"patch"> and return resulting
+Perform C<PATCH> request with L<Mojo::UserAgent/"patch"> and return resulting
 L<Mojo::Message::Response> object.
 
 =head2 u
 
   my $res = u('example.com');
-  my $res = u('http://example.com' => {DNT => 1} => 'Hi!');
+  my $res = u('http://example.com' => {Accept => '*/*'} => 'Hi!');
 
-Perform PUT request with L<Mojo::UserAgent/"put"> and return resulting
+Perform C<PUT> request with L<Mojo::UserAgent/"put"> and return resulting
 L<Mojo::Message::Response> object.
 
 =head2 x

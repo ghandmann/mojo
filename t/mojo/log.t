@@ -37,14 +37,23 @@ like $content, qr/\[.*\] \[debug\] Works too\.\n/, 'right debug message';
 
 # Formatting
 $log = Mojo::Log->new;
-like $log->format(debug => 'Test 123.'), qr/^\[.*\] \[debug\] Test 123\.\n$/,
-  'right format';
-like $log->format(qw(debug Test 1 2 3)),
+like $log->format->(time, 'debug', 'Test 123.'),
+  qr/^\[.*\] \[debug\] Test 123\.\n$/, 'right format';
+like $log->format->(time, 'debug', qw(Test 1 2 3)),
   qr/^\[.*\] \[debug\] Test\n1\n2\n3\n$/, 'right format';
-like decode('UTF-8', $log->format(error => 'I ♥ Mojolicious.')),
+like $log->format->(time, 'error', 'I ♥ Mojolicious.'),
   qr/^\[.*\] \[error\] I ♥ Mojolicious\.\n$/, 'right format';
+$log->format(
+  sub {
+    my ($time, $level, @lines) = @_;
+    return join ':', $level, $time, @lines;
+  }
+);
+like $log->format->(time, 'debug', qw(Test 1 2 3)),
+  qr/^debug:\d+:Test:1:2:3$/, 'right format';
 
 # Events
+$log = Mojo::Log->new;
 my $msgs = [];
 $log->unsubscribe('message')->on(
   message => sub {
@@ -69,6 +78,31 @@ is_deeply $msgs, [qw(fatal Test 1 2 3)], 'right message';
 $msgs = [];
 $log->log('fatal', 'Test', 1, 2, 3);
 is_deeply $msgs, [qw(fatal Test 1 2 3)], 'right message';
+
+# History
+$buffer = '';
+my $history;
+{
+  open my $handle, '>', \$buffer;
+  local *STDERR = $handle;
+  my $log = Mojo::Log->new->max_history_size(2)->level('info');
+  $log->error('First.');
+  $log->fatal('Second.');
+  $log->debug('Third.');
+  $log->info('Fourth.', 'Fifth.');
+  $history = $log->history;
+}
+$content = decode 'UTF-8', $buffer;
+like $content,   qr/\[.*\] \[error\] First\.\n/,         'right error message';
+like $content,   qr/\[.*\] \[info\] Fourth\.\nFifth.\n/, 'right info message';
+unlike $content, qr/debug/,                              'no debug message';
+like $history->[0][0], qr/^\d+$/, 'right epoch time';
+is $history->[0][1],   'fatal',   'right level';
+is $history->[0][2],   'Second.', 'right message';
+is $history->[1][1],   'info',    'right level';
+is $history->[1][2],   'Fourth.', 'right message';
+is $history->[1][3],   'Fifth.',  'right message';
+ok !$history->[2], 'no more messages';
 
 # "debug"
 is $log->level('debug')->level, 'debug', 'right level';

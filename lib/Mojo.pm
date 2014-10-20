@@ -8,20 +8,22 @@ use Mojo::Home;
 use Mojo::Log;
 use Mojo::Transaction::HTTP;
 use Mojo::UserAgent;
+use Mojo::Util;
 use Scalar::Util 'weaken';
 
 has home => sub { Mojo::Home->new };
 has log  => sub { Mojo::Log->new };
 has ua   => sub {
-  my $self = shift;
-
   my $ua = Mojo::UserAgent->new;
-  weaken $ua->server->app($self)->{app};
-  weaken $self;
-  $ua->on(error => sub { $self->log->error($_[1]) });
-
+  weaken $ua->server->app(shift)->{app};
   return $ua;
 };
+
+sub build_tx { Mojo::Transaction::HTTP->new }
+
+sub config { Mojo::Util::_stash(config => @_) }
+
+sub handler { croak 'Method "handler" not implemented in subclass' }
 
 sub new {
   my $self = shift->SUPER::new(@_);
@@ -31,28 +33,6 @@ sub new {
   $home->detect(ref $self) unless @{$home->parts};
   $self->log->path($home->rel_file('log/mojo.log'))
     if -w $home->rel_file('log');
-
-  return $self;
-}
-
-sub build_tx { Mojo::Transaction::HTTP->new }
-
-sub config { shift->_dict(config => @_) }
-
-sub handler { croak 'Method "handler" not implemented in subclass' }
-
-sub _dict {
-  my ($self, $name) = (shift, shift);
-
-  # Hash
-  my $dict = $self->{$name} ||= {};
-  return $dict unless @_;
-
-  # Get
-  return $dict->{$_[0]} unless @_ > 1 || ref $_[0];
-
-  # Set
-  %$dict = (%$dict, %{ref $_[0] ? $_[0] : {@_}});
 
   return $self;
 }
@@ -90,10 +70,9 @@ Mojo - Duct tape for the HTML5 web!
 
 =head1 DESCRIPTION
 
-Mojo provides a flexible runtime environment for Perl real-time web
-frameworks. It provides all the basic tools and helpers needed to write
-simple web applications and higher level web frameworks, such as
-L<Mojolicious>.
+A flexible runtime environment for Perl real-time web frameworks, with all the
+basic tools and helpers needed to write simple web applications and higher
+level web frameworks, such as L<Mojolicious>.
 
 See L<Mojolicious::Guides> for more!
 
@@ -128,9 +107,7 @@ The logging layer of your application, defaults to a L<Mojo::Log> object.
   $app   = $app->ua(Mojo::UserAgent->new);
 
 A full featured HTTP user agent for use in your applications, defaults to a
-L<Mojo::UserAgent> object. Note that this user agent should not be used in
-plugins, since non-blocking requests that are already in progress will
-interfere with new blocking ones.
+L<Mojo::UserAgent> object.
 
   # Perform blocking request
   say $app->ua->get('example.com')->res->body;
@@ -139,14 +116,6 @@ interfere with new blocking ones.
 
 L<Mojo> inherits all methods from L<Mojo::Base> and implements the following
 new ones.
-
-=head2 new
-
-  my $app = Mojo->new;
-
-Construct a new L<Mojo> application. Will automatically detect your home
-directory if necessary and set up logging to C<log/mojo.log> if there's a
-C<log> directory.
 
 =head2 build_tx
 
@@ -180,6 +149,14 @@ be overloaded in a subclass.
     my ($self, $tx) = @_;
     ...
   }
+
+=head2 new
+
+  my $app = Mojo->new;
+
+Construct a new L<Mojo> application. Will automatically detect your home
+directory if necessary and set up logging to C<log/mojo.log> if there's a
+C<log> directory.
 
 =head1 SEE ALSO
 

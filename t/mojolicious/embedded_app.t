@@ -11,7 +11,7 @@ use Mojolicious::Lite;
 use Test::Mojo;
 
 # Custom secret
-app->secret('very secr3t!');
+app->secrets(['very secr3t!']);
 
 # Mount full external application a few times
 use FindBin;
@@ -24,8 +24,8 @@ plugin(Mount => ('*.foo-bar.de/♥/123' => $external));
 get '/hello' => 'works';
 
 get '/primary' => sub {
-  my $self = shift;
-  $self->render(text => ++$self->session->{primary});
+  my $c = shift;
+  $c->render(text => ++$c->session->{primary});
 };
 
 my $t = Test::Mojo->new;

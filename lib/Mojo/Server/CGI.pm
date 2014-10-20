@@ -26,18 +26,17 @@ sub run {
   # Response start line
   STDOUT->autoflush(1);
   binmode STDOUT;
-  my $res = $tx->res;
+  my $res = $tx->res->fix_headers;
   return undef if $self->nph && !_write($res, 'get_start_line_chunk');
 
   # Response headers
-  $res->fix_headers;
   my $code = $res->code    || 404;
   my $msg  = $res->message || $res->default_message;
   $res->headers->status("$code $msg") unless $self->nph;
   return undef unless _write($res, 'get_header_chunk');
 
   # Response body
-  $tx->is_empty or _write($res, 'get_body_chunk') or return undef;
+  return undef unless $tx->is_empty || _write($res, 'get_body_chunk');
 
   # Finish transaction
   $tx->server_close;
@@ -79,7 +78,7 @@ Mojo::Server::CGI - CGI server
   use Mojo::Server::CGI;
 
   my $cgi = Mojo::Server::CGI->new;
-  $cgi->unsubscribe('request')
+  $cgi->unsubscribe('request');
   $cgi->on(request => sub {
     my ($cgi, $tx) = @_;
 
@@ -99,9 +98,10 @@ Mojo::Server::CGI - CGI server
 
 =head1 DESCRIPTION
 
-L<Mojo::Server::CGI> is a simple and portable implementation of RFC 3875.
+L<Mojo::Server::CGI> is a simple and portable implementation of
+L<RFC 3875|http://tools.ietf.org/html/rfc3875>.
 
-See L<Mojolicious::Guides::Cookbook> for more.
+See L<Mojolicious::Guides::Cookbook/"DEPLOYMENT"> for more.
 
 =head1 EVENTS
 

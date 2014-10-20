@@ -1,9 +1,12 @@
 package Mojo::EventEmitter;
 use Mojo::Base -base;
 
+use Mojo::Util 'deprecated';
 use Scalar::Util qw(blessed weaken);
 
 use constant DEBUG => $ENV{MOJO_EVENTEMITTER_DEBUG} || 0;
+
+sub catch { $_[0]->on(error => $_[1]) and return $_[0] }
 
 sub emit {
   my ($self, $name) = (shift, shift);
@@ -20,21 +23,18 @@ sub emit {
   return $self;
 }
 
+# DEPRECATED in Tiger Face!
 sub emit_safe {
+  deprecated 'Mojo::EventEmitter::emit_safe is DEPRECATED';
   my ($self, $name) = (shift, shift);
 
   if (my $s = $self->{events}{$name}) {
-    warn "-- Emit $name in @{[blessed $self]} safely (@{[scalar @$s]})\n"
-      if DEBUG;
     for my $cb (@$s) {
       $self->emit(error => qq{Event "$name" failed: $@})
         unless eval { $self->$cb(@_); 1 };
     }
   }
-  else {
-    warn "-- Emit $name in @{[blessed $self]} safely (0)\n" if DEBUG;
-    die "@{[blessed $self]}: $_[0]" if $name eq 'error';
-  }
+  else { die "@{[blessed $self]}: $_[0]" if $name eq 'error' }
 
   return $self;
 }
@@ -123,7 +123,8 @@ L<Mojo::EventEmitter> can emit the following events.
     ...
   });
 
-Emitted for event errors, fatal if unhandled.
+This is a special event for errors, it will not be emitted directly by this
+class but is fatal if unhandled.
 
   $e->on(error => sub {
     my ($e, $err) = @_;
@@ -135,19 +136,21 @@ Emitted for event errors, fatal if unhandled.
 L<Mojo::EventEmitter> inherits all methods from L<Mojo::Base> and
 implements the following new ones.
 
+=head2 catch
+
+  $e = $e->catch(sub {...});
+
+Subscribe to L</"error"> event.
+
+  # Longer version
+  $e->on(error => sub {...});
+
 =head2 emit
 
   $e = $e->emit('foo');
   $e = $e->emit('foo', 123);
 
 Emit event.
-
-=head2 emit_safe
-
-  $e = $e->emit_safe('foo');
-  $e = $e->emit_safe('foo', 123);
-
-Emit event safely and emit L</"error"> event on failure.
 
 =head2 has_subscribers
 
@@ -195,7 +198,7 @@ Unsubscribe from event.
 
 =head1 DEBUGGING
 
-You can set the MOJO_EVENTEMITTER_DEBUG environment variable to get some
+You can set the C<MOJO_EVENTEMITTER_DEBUG> environment variable to get some
 advanced diagnostics information printed to C<STDERR>.
 
   MOJO_EVENTEMITTER_DEBUG=1

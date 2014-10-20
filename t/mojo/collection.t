@@ -24,8 +24,8 @@ is_deeply [c()->compact->each], [], 'right result';
 # flatten
 is_deeply [c(1, 2, [3, 4], 5, c(6, 7))->flatten->each], [1, 2, 3, 4, 5, 6, 7],
   'right result';
-is_deeply [c(undef, 1, [2, [3, c(4, 5)]], undef, 6)->flatten->each],
-  [undef, 1, 2, 3, 4, 5, undef, 6], 'right result';
+is_deeply [c(undef, 1, [2, {}, [3, c(4, 5)]], undef, 6)->flatten->each],
+  [undef, 1, 2, {}, 3, 4, 5, undef, 6], 'right result';
 
 # each
 $collection = c(3, 2, 1);
@@ -48,7 +48,12 @@ is $collection->first(qr/[1-4]/), 4, 'right result';
 is $collection->first(sub { ref $_ eq 'CODE' }), undef, 'no result';
 $collection = c();
 is $collection->first, undef, 'no result';
-is $collection->first(sub { defined $_ }), undef, 'no result';
+is $collection->first(sub {defined}), undef, 'no result';
+
+# last
+is c(5, 4, 3)->last, 3, 'right result';
+is c(5, 4, 3)->reverse->last, 5, 'right result';
+is c()->last, undef, 'no result';
 
 # grep
 $collection = c(1, 2, 3, 4, 5, 6, 7, 8, 9);
@@ -107,9 +112,17 @@ is $collection->size, 1, 'right size';
 $collection = c(5, 4, 3, 2, 1);
 is $collection->size, 5, 'right size';
 
+# reduce
+$collection = c(2, 5, 4, 1);
+is $collection->reduce(sub { $a + $b }), 12, 'right result';
+is $collection->reduce(sub { $a + $b }, 5), 17, 'right result';
+is c()->reduce(sub { $a + $b }), undef, 'no result';
+
 # sort
 $collection = c(2, 5, 4, 1);
 is_deeply [$collection->sort->each], [1, 2, 4, 5], 'right order';
+is_deeply [$collection->sort(sub { $b cmp $a })->each], [5, 4, 2, 1],
+  'right order';
 is_deeply [$collection->sort(sub { $_[1] cmp $_[0] })->each], [5, 4, 2, 1],
   'right order';
 $collection = c(qw(Test perl Mojo));
@@ -117,8 +130,7 @@ is_deeply [$collection->sort(sub { uc(shift) cmp uc(shift) })->each],
   [qw(Mojo perl Test)], 'right order';
 $collection = c();
 is_deeply [$collection->sort->each], [], 'no elements';
-is_deeply [$collection->sort(sub { $_[1] cmp $_[0] })->each], [],
-  'no elements';
+is_deeply [$collection->sort(sub { $a cmp $b })->each], [], 'no elements';
 
 # slice
 $collection = c(1, 2, 3, 4, 5, 6, 7, 10, 9, 8);
@@ -132,6 +144,8 @@ is_deeply [$collection->slice(6, 1, 4)->each], [7, 2, 5], 'right result';
 is_deeply [$collection->slice(6 .. 9)->each], [7, 10, 9, 8], 'right result';
 
 # pluck
+is c({foo => 'bar'}, {foo => 'baz'})->pluck('foo')->join, 'barbaz',
+  'right result';
 $collection = c(c(1, 2, 3), c(4, 5, 6), c(7, 8, 9));
 is $collection->pluck('reverse'), "3\n2\n1\n6\n5\n4\n9\n8\n7", 'right result';
 is $collection->pluck(join => '-'), "1-2-3\n4-5-6\n7-8-9", 'right result';
@@ -147,10 +161,6 @@ is_deeply [$collection->uniq->reverse->uniq->each], [5, 4, 3, 2, 1],
   'right result';
 
 # Missing method and function (AUTOLOAD)
-eval { Mojo::Collection->new->missing };
-like $@,
-  qr/^Can't locate object method "missing" via package "Mojo::Collection"/,
-  'right error';
 eval { Mojo::Collection->new(b('whatever'))->missing };
 like $@,
   qr/^Can't locate object method "missing" via package "Mojo::ByteStream"/,

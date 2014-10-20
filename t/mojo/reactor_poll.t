@@ -21,7 +21,7 @@ is ref $reactor, 'Mojo::Reactor::Poll', 'right object';
 
 # Make sure it stops automatically when not watching for events
 my $triggered;
-Mojo::IOLoop->timer(0.25 => sub { $triggered++ });
+Mojo::IOLoop->next_tick(sub { $triggered++ });
 Mojo::IOLoop->start;
 ok $triggered, 'reactor waited for one event';
 my $time = time;
@@ -30,12 +30,8 @@ Mojo::IOLoop->one_tick;
 ok time < ($time + 10), 'stopped automatically';
 
 # Listen
-my $port   = Mojo::IOLoop->generate_port;
-my $listen = IO::Socket::INET->new(
-  Listen    => 5,
-  LocalAddr => '127.0.0.1',
-  LocalPort => $port
-);
+my $listen = IO::Socket::INET->new(Listen => 5, LocalAddr => '127.0.0.1');
+my $port = $listen->sockport;
 my ($readable, $writable);
 $reactor->io($listen => sub { pop() ? $writable++ : $readable++ })
   ->watch($listen, 0, 0)->watch($listen, 1, 1);
@@ -124,13 +120,6 @@ ok $readable, 'handle is readable again';
 ok $writable, 'handle is writable again';
 ok !$timer, 'timer was not triggered';
 ok $recurring, 'recurring was triggered again';
-($readable, $writable, $timer, $recurring) = ();
-$reactor->timer(0.025 => sub { shift->stop });
-$reactor->start;
-ok $readable, 'handle is readable again';
-ok $writable, 'handle is writable again';
-ok !$timer, 'timer was not triggered';
-ok $recurring, 'recurring was triggered again';
 $reactor->remove($id);
 ($readable, $writable, $timer, $recurring) = ();
 $reactor->timer(0.025 => sub { shift->stop });
@@ -139,19 +128,34 @@ ok $readable, 'handle is readable again';
 ok $writable, 'handle is writable again';
 ok !$timer,     'timer was not triggered';
 ok !$recurring, 'recurring was not triggered again';
+($readable, $writable, $timer, $recurring) = ();
+$id = $reactor->recurring(0 => sub { $recurring++ });
+is $reactor->next_tick(sub { shift->stop }), undef, 'returned undef';
+$reactor->start;
+ok $readable, 'handle is readable again';
+ok $writable, 'handle is writable again';
+ok !$timer, 'timer was not triggered';
+ok $recurring, 'recurring was triggered again';
 
 # Reset
-$reactor->remove($id);
-$reactor->remove($server);
-($readable, $writable) = ();
+$reactor->reset;
+($readable, $writable, $recurring) = ();
 $reactor->timer(0.025 => sub { shift->stop });
 $reactor->start;
-ok !$readable, 'io event was not triggered again';
-ok !$writable, 'io event was not triggered again';
+ok !$readable,  'io event was not triggered again';
+ok !$writable,  'io event was not triggered again';
+ok !$recurring, 'recurring was not triggered again';
 my $reactor2 = Mojo::Reactor::Poll->new;
 is ref $reactor2, 'Mojo::Reactor::Poll', 'right object';
 
-# Parallel reactors
+# Reset while watchers are active
+$writable = undef;
+$reactor->io($_ => sub { ++$writable and shift->reset })->watch($_, 0, 1)
+  for $client, $server;
+$reactor->start;
+is $writable, 1, 'only one handle was writable';
+
+# Concurrent reactors
 $timer = 0;
 $reactor->recurring(0 => sub { $timer++ });
 my $timer2;
@@ -234,11 +238,10 @@ is(Mojo::Reactor->detect, 'Mojo::Reactor::Test', 'right class');
 $ENV{MOJO_REACTOR} = 'Mojo::Reactor::Poll';
 is ref Mojo::IOLoop->singleton->reactor, 'Mojo::Reactor::Poll', 'right object';
 ok !Mojo::IOLoop->is_running, 'loop is not running';
-$port = Mojo::IOLoop->generate_port;
 my ($server_err, $server_running, $client_err, $client_running);
 $server = $client = '';
-Mojo::IOLoop->server(
-  {address => '127.0.0.1', port => $port} => sub {
+$id = Mojo::IOLoop->server(
+  {address => '127.0.0.1'} => sub {
     my ($loop, $stream) = @_;
     $stream->write('test' => sub { shift->write('321') });
     $stream->on(read => sub { $server .= pop });
@@ -247,6 +250,7 @@ Mojo::IOLoop->server(
     $server_err = $@;
   }
 );
+$port = Mojo::IOLoop->acceptor($id)->handle->sockport;
 Mojo::IOLoop->client(
   {port => $port} => sub {
     my ($loop, $err, $stream) = @_;

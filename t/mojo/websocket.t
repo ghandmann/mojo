@@ -27,76 +27,75 @@ app->log->level('fatal');
 app->renderer->paths->[0] = app->home->rel_dir('public');
 
 get '/link' => sub {
-  my $self = shift;
-  $self->render(text => $self->url_for('index')->to_abs);
+  my $c = shift;
+  $c->render(text => $c->url_for('index')->to_abs);
 };
 
 websocket '/' => sub {
-  my $self = shift;
-  $self->on(finish => sub { shift->stash->{finished}++ });
-  $self->on(
+  my $c = shift;
+  $c->on(finish => sub { shift->stash->{finished}++ });
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      my $url = $self->url_for->to_abs;
-      $self->send("${msg}test2$url");
+      my ($c, $msg) = @_;
+      my $url = $c->url_for->to_abs;
+      $c->send("${msg}test2$url");
     }
   );
 } => 'index';
 
 get '/something/else' => sub {
-  my $self = shift;
-  my $timeout
-    = Mojo::IOLoop->singleton->stream($self->tx->connection)->timeout;
-  $self->render(text => "${timeout}failed!");
+  my $c       = shift;
+  my $timeout = Mojo::IOLoop->singleton->stream($c->tx->connection)->timeout;
+  $c->render(text => "${timeout}failed!");
 };
 
 websocket '/socket' => sub {
-  my $self = shift;
-  $self->send(
-    $self->req->headers->host => sub {
-      my $self = shift;
-      $self->send(Mojo::IOLoop->stream($self->tx->connection)->timeout);
-      $self->finish(1000 => 'I ♥ Mojolicious!');
+  my $c = shift;
+  $c->send(
+    $c->req->headers->host => sub {
+      my $c = shift;
+      $c->send(Mojo::IOLoop->stream($c->tx->connection)->timeout);
+      $c->finish(1000 => 'I ♥ Mojolicious!');
     }
   );
 };
 
 websocket '/early_start' => sub {
-  my $self = shift;
-  $self->send('test1');
-  $self->on(
+  my $c = shift;
+  $c->send('test1');
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send("${msg}test2")->finish;
+      my ($c, $msg) = @_;
+      $c->send("${msg}test2")->finish;
     }
   );
 };
 
 websocket '/denied' => sub {
-  my $self = shift;
-  $self->tx->handshake->on(finish => sub { $self->stash->{handshake}++ });
-  $self->on(finish => sub { shift->stash->{finished}++ });
-  $self->render(text => 'denied', status => 403);
+  my $c = shift;
+  $c->tx->handshake->on(finish => sub { $c->stash->{handshake}++ });
+  $c->on(finish => sub { shift->stash->{finished}++ });
+  $c->render(text => 'denied', status => 403);
 };
 
 websocket '/subreq' => sub {
-  my $self = shift;
-  $self->ua->websocket(
+  my $c = shift;
+  $c->ua->websocket(
     '/echo' => sub {
       my ($ua, $tx) = @_;
       $tx->on(
         message => sub {
           my ($tx, $msg) = @_;
-          $self->send($msg);
+          $c->send($msg);
           $tx->finish;
-          $self->finish;
+          $c->finish;
         }
       );
       $tx->send('test1');
     }
   );
-  $self->send('test0');
-  $self->on(finish => sub { shift->stash->{finished}++ });
+  $c->send('test0');
+  $c->on(finish => sub { shift->stash->{finished}++ });
 };
 
 websocket '/echo' => sub {
@@ -106,8 +105,8 @@ websocket '/echo' => sub {
 websocket '/double_echo' => sub {
   shift->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send($msg => sub { shift->send($msg) });
+      my ($c, $msg) = @_;
+      $c->send($msg => sub { shift->send($msg) });
     }
   );
 };
@@ -126,9 +125,9 @@ websocket '/close' => sub {
 };
 
 websocket '/timeout' => sub {
-  my $self = shift;
-  Mojo::IOLoop->stream($self->tx->connection)->timeout(0.25);
-  $self->on(finish => sub { shift->stash->{finished}++ });
+  my $c = shift;
+  $c->inactivity_timeout(0.25);
+  $c->on(finish => sub { shift->stash->{finished}++ });
 };
 
 # URL for WebSocket
@@ -182,7 +181,7 @@ ok $body =~ /^(\d+)failed!$/, 'right content';
 is $1, 15, 'right timeout';
 
 # Using an already prepared socket
-my $port = $ua->server->url->port;
+my $port = $ua->server->nb_url->port;
 my $tx   = $ua->build_websocket_tx('ws://lalala/socket');
 my $finished;
 $tx->on(finish => sub { $finished++ });
@@ -269,7 +268,7 @@ is $stash->{finished}, 1, 'finish event has been emitted once';
 is $code,   101,          'right status';
 is $result, 'test0test1', 'right result';
 
-# Parallel subrequests
+# Concurrent subrequests
 my $delay = Mojo::IOLoop->delay;
 ($code, $result) = ();
 my ($code2, $result2);
@@ -383,7 +382,7 @@ $ua->websocket(
 );
 Mojo::IOLoop->start;
 ok $finished, 'transaction is finished';
-ok !$ws, 'no websocket';
+ok !$ws, 'not a websocket';
 is $code, 500, 'right status';
 is $msg, 'Internal Server Error', 'right message';
 
@@ -399,7 +398,7 @@ $ua->websocket(
   }
 );
 Mojo::IOLoop->start;
-ok !$ws, 'no websocket';
+ok !$ws, 'not a websocket';
 is $code, 403,            'right status';
 is $msg,  "i'm a teapot", 'right message';
 
@@ -421,7 +420,7 @@ $ua->websocket(
 Mojo::IOLoop->start;
 is $status, 1006, 'right status';
 
-# 16bit length
+# 16-bit length
 $result = undef;
 $ua->websocket(
   '/echo' => sub {
@@ -455,17 +454,15 @@ is $stash->{finished}, 1, 'finish event has been emitted once';
 like $log, qr/Inactivity timeout\./, 'right log message';
 app->log->unsubscribe(message => $msg);
 
-# Ping/pong (with negotiated compression)
-my ($pong, $compressed, $extensions);
+# Ping/pong
+my $pong;
 $ua->websocket(
   '/echo' => sub {
     my ($ua, $tx) = @_;
     $tx->on(
       frame => sub {
         my ($tx, $frame) = @_;
-        $pong       = $frame->[5] if $frame->[4] == 10;
-        $compressed = $tx->compressed;
-        $extensions = $tx->res->headers->sec_websocket_extensions;
+        $pong = $frame->[5] if $frame->[4] == 10;
         Mojo::IOLoop->stop;
       }
     );
@@ -474,7 +471,5 @@ $ua->websocket(
 );
 Mojo::IOLoop->start;
 is $pong, 'test', 'received pong with payload';
-ok $compressed, 'WebSocket has compression';
-is $extensions, 'permessage-deflate', 'right "Sec-WebSocket-Extensions" value';
 
 done_testing();

@@ -10,12 +10,12 @@ sub CLONE { die "EV does not work with ithreads.\n" }
 
 sub DESTROY { undef $EV }
 
-# We have to fall back to Mojo::Reactor::Poll, since EV is unique
-sub new { $EV++ ? Mojo::Reactor::Poll->new : shift->SUPER::new }
-
 sub again { shift->{timers}{shift()}{watcher}->again }
 
 sub is_running { !!EV::depth }
+
+# We have to fall back to Mojo::Reactor::Poll, since EV is unique
+sub new { $EV++ ? Mojo::Reactor::Poll->new : shift->SUPER::new }
 
 sub one_tick { EV::run(EV::RUN_ONCE) }
 
@@ -30,15 +30,15 @@ sub timer { shift->_timer(0, @_) }
 sub watch {
   my ($self, $handle, $read, $write) = @_;
 
+  my $mode = 0;
+  $mode |= EV::READ  if $read;
+  $mode |= EV::WRITE if $write;
+
   my $fd = fileno $handle;
   my $io = $self->{io}{$fd};
-  my $mode;
-  if ($read && $write) { $mode = EV::READ | EV::WRITE }
-  elsif ($read)  { $mode = EV::READ }
-  elsif ($write) { $mode = EV::WRITE }
-  else           { delete $io->{watcher} }
-  if (my $w = $io->{watcher}) { $w->set($fd, $mode) }
-  elsif ($mode) {
+  if ($mode == 0) { delete $io->{watcher} }
+  elsif (my $w = $io->{watcher}) { $w->set($fd, $mode) }
+  else {
     weaken $self;
     $io->{watcher} = EV::io($fd, $mode, sub { $self->_io($fd, @_) });
   }
@@ -49,14 +49,14 @@ sub watch {
 sub _io {
   my ($self, $fd, $w, $revents) = @_;
   my $io = $self->{io}{$fd};
-  $self->_sandbox('Read', $io->{cb}, 0) if EV::READ &$revents;
+  $self->_sandbox('Read', $io->{cb}, 0) if EV::READ & $revents;
   $self->_sandbox('Write', $io->{cb}, 1)
-    if EV::WRITE &$revents && $self->{io}{$fd};
+    if EV::WRITE & $revents && $self->{io}{$fd};
 }
 
 sub _timer {
   my ($self, $recurring, $after, $cb) = @_;
-  $after ||= '0.0001';
+  $after ||= 0.0001 if $recurring;
 
   my $id = $self->SUPER::_timer(0, 0, $cb);
   weaken $self;
@@ -77,7 +77,7 @@ sub _timer {
 
 =head1 NAME
 
-Mojo::Reactor::EV - Low level event reactor with libev support
+Mojo::Reactor::EV - Low-level event reactor with libev support
 
 =head1 SYNOPSIS
 
@@ -105,7 +105,7 @@ Mojo::Reactor::EV - Low level event reactor with libev support
 
 =head1 DESCRIPTION
 
-L<Mojo::Reactor::EV> is a low level event reactor based on L<EV> (4.0+).
+L<Mojo::Reactor::EV> is a low-level event reactor based on L<EV> (4.0+).
 
 =head1 EVENTS
 
@@ -115,12 +115,6 @@ L<Mojo::Reactor::EV> inherits all events from L<Mojo::Reactor::Poll>.
 
 L<Mojo::Reactor::EV> inherits all methods from L<Mojo::Reactor::Poll> and
 implements the following new ones.
-
-=head2 new
-
-  my $reactor = Mojo::Reactor::EV->new;
-
-Construct a new L<Mojo::Reactor::EV> object.
 
 =head2 again
 
@@ -133,6 +127,12 @@ Restart active timer.
   my $bool = $reactor->is_running;
 
 Check if reactor is running.
+
+=head2 new
+
+  my $reactor = Mojo::Reactor::EV->new;
+
+Construct a new L<Mojo::Reactor::EV> object.
 
 =head2 one_tick
 

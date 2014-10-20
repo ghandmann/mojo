@@ -1,14 +1,17 @@
 package Mojo::Util;
-use Mojo::Base 'Exporter';
+use Mojo::Base -strict;
 
 use Carp qw(carp croak);
 use Data::Dumper ();
 use Digest::MD5 qw(md5 md5_hex);
-use Digest::SHA qw(hmac_sha1 sha1 sha1_hex);
+use Digest::SHA qw(hmac_sha1_hex sha1 sha1_hex);
 use Encode 'find_encoding';
+use Exporter 'import';
 use File::Basename 'dirname';
 use File::Spec::Functions 'catfile';
+use List::Util 'min';
 use MIME::Base64 qw(decode_base64 encode_base64);
+use Symbol 'delete_package';
 use Time::HiRes ();
 
 # Check for monotonic clock support
@@ -26,6 +29,9 @@ use constant {
   PC_INITIAL_N    => 128
 };
 
+# Will be shipping with Perl 5.22
+my $NAME = eval 'use Sub::Util; 1' ? \&Sub::Util::set_subname : sub { $_[1] };
+
 # To update HTML entities run this command
 # perl examples/entities.pl > lib/Mojo/entities.txt
 my %ENTITIES;
@@ -34,15 +40,25 @@ for my $line (split "\x0a", slurp(catfile dirname(__FILE__), 'entities.txt')) {
   $ENTITIES{$1} = defined $3 ? (chr(hex $2) . chr(hex $3)) : chr(hex $2);
 }
 
+# Characters that should be escaped in XML
+my %XML = (
+  '&'  => '&amp;',
+  '<'  => '&lt;',
+  '>'  => '&gt;',
+  '"'  => '&quot;',
+  '\'' => '&#39;'
+);
+
 # Encoding cache
 my %CACHE;
 
 our @EXPORT_OK = (
   qw(b64_decode b64_encode camelize class_to_file class_to_path decamelize),
-  qw(decode deprecated dumper encode get_line hmac_sha1_sum html_unescape),
-  qw(md5_bytes md5_sum monkey_patch punycode_decode punycode_encode quote),
+  qw(decode deprecated dumper encode hmac_sha1_sum html_unescape md5_bytes),
+  qw(md5_sum monkey_patch punycode_decode punycode_encode quote),
   qw(secure_compare sha1_bytes sha1_sum slurp split_header spurt squish),
-  qw(steady_time trim unquote url_escape url_unescape xml_escape xor_encode)
+  qw(steady_time tablify trim unindent unquote url_escape url_unescape),
+  qw(xml_escape xor_encode)
 );
 
 sub b64_decode { decode_base64($_[0]) }
@@ -54,8 +70,8 @@ sub camelize {
 
   # CamelCase words
   return join '::', map {
-    join '', map { ucfirst lc } split /_/, $_
-  } split /-/, $str;
+    join('', map { ucfirst lc } split '_')
+  } split '-', $str;
 }
 
 sub class_to_file {
@@ -71,17 +87,10 @@ sub decamelize {
   my $str = shift;
   return $str if $str !~ /^[A-Z]/;
 
-  # Module parts
-  my @parts;
-  for my $part (split /::/, $str) {
-
-    # snake_case words
-    my @words;
-    push @words, lc $1 while $part =~ s/([A-Z]{1}[^A-Z]*)//;
-    push @parts, join '_', @words;
-  }
-
-  return join '-', @parts;
+  # snake_case words
+  return join '-', map {
+    join('_', map {lc} grep {length} split /([A-Z]{1}[^A-Z]*)/)
+  } split '::', $str;
 }
 
 sub decode {
@@ -96,27 +105,16 @@ sub deprecated {
   $ENV{MOJO_FATAL_DEPRECATIONS} ? croak(@_) : carp(@_);
 }
 
-sub dumper { Data::Dumper->new([@_])->Indent(1)->Sortkeys(1)->Terse(1)->Dump }
+sub dumper {
+  Data::Dumper->new([@_])->Indent(1)->Sortkeys(1)->Terse(1)->Useqq(1)->Dump;
+}
 
 sub encode { _encoding($_[0])->encode("$_[1]") }
 
-sub get_line {
-
-  # Locate line ending
-  return undef if (my $pos = index ${$_[0]}, "\x0a") == -1;
-
-  # Extract line and ending
-  my $line = substr ${$_[0]}, 0, $pos + 1, '';
-  $line =~ s/\x0d?\x0a$//;
-
-  return $line;
-}
-
-sub hmac_sha1_sum { unpack 'H*', hmac_sha1(@_) }
+sub hmac_sha1_sum { hmac_sha1_hex(@_) }
 
 sub html_unescape {
   my $str = shift;
-  return $str if index($str, '&') == -1;
   $str =~ s/&(?:\#((?:\d{1,7}|x[0-9a-fA-F]{1,6}));|(\w+;?))/_decode($1, $2)/ge;
   return $str;
 }
@@ -128,7 +126,7 @@ sub monkey_patch {
   my ($class, %patch) = @_;
   no strict 'refs';
   no warnings 'redefine';
-  *{"${class}::$_"} = $patch{$_} for keys %patch;
+  *{"${class}::$_"} = $NAME->("${class}::$_", $patch{$_}) for keys %patch;
 }
 
 # Direct translation of RFC 3492
@@ -142,7 +140,7 @@ sub punycode_decode {
   my @output;
 
   # Consume all code points before the last delimiter
-  push @output, split //, $1 if $input =~ s/(.*)\x2d//s;
+  push @output, split '', $1 if $input =~ s/(.*)\x2d//s;
 
   while (length $input) {
     my $oldi = $i;
@@ -179,7 +177,7 @@ sub punycode_encode {
 
   # Extract basic code points
   my $len   = length $output;
-  my @input = map {ord} split //, $output;
+  my @input = map {ord} split '', $output;
   my @chars = sort grep { $_ >= PC_INITIAL_N } @input;
   $output =~ s/[^\x00-\x7f]+//gs;
   my $h = my $b = length $output;
@@ -286,9 +284,33 @@ sub steady_time () {
     : Time::HiRes::time;
 }
 
+sub tablify {
+  my $rows = shift;
+
+  my @spec;
+  for my $row (@$rows) {
+    for my $i (0 .. $#$row) {
+      $row->[$i] =~ s/[\r\n]//g;
+      my $len = length $row->[$i];
+      $spec[$i] = $len if $len >= ($spec[$i] // 0);
+    }
+  }
+
+  my $format = join '  ', map({"\%-${_}s"} @spec[0 .. $#spec - 1]), '%s';
+  return join '', map { sprintf "$format\n", @$_ } @$rows;
+}
+
 sub trim {
   my $str = shift;
-  $str =~ s/^\s+|\s+$//g;
+  $str =~ s/^\s+//;
+  $str =~ s/\s+$//;
+  return $str;
+}
+
+sub unindent {
+  my $str = shift;
+  my $min = min map { m/^([ \t]*)/; length $1 || () } split "\n", $str;
+  $str =~ s/^[ \t]{0,$min}//gm if $min;
   return $str;
 }
 
@@ -302,27 +324,20 @@ sub unquote {
 
 sub url_escape {
   my ($str, $pattern) = @_;
-  $pattern ||= '^A-Za-z0-9\-._~';
-  $str =~ s/([$pattern])/sprintf('%%%02X',ord($1))/ge;
+  if ($pattern) { $str =~ s/([$pattern])/sprintf('%%%02X',ord($1))/ge }
+  else          { $str =~ s/([^A-Za-z0-9\-._~])/sprintf('%%%02X',ord($1))/ge }
   return $str;
 }
 
 sub url_unescape {
   my $str = shift;
-  return $str if index($str, '%') == -1;
   $str =~ s/%([0-9a-fA-F]{2})/chr(hex($1))/ge;
   return $str;
 }
 
 sub xml_escape {
   my $str = shift;
-
-  $str =~ s/&/&amp;/g;
-  $str =~ s/</&lt;/g;
-  $str =~ s/>/&gt;/g;
-  $str =~ s/"/&quot;/g;
-  $str =~ s/'/&#39;/g;
-
+  $str =~ s/([&<>"'])/$XML{$1}/ge;
   return $str;
 }
 
@@ -371,6 +386,44 @@ sub _encoding {
   $CACHE{$_[0]} //= find_encoding($_[0]) // croak "Unknown encoding '$_[0]'";
 }
 
+sub _options {
+
+  # Hash or name (one)
+  return ref $_[0] eq 'HASH' ? (undef, %{shift()}) : @_ if @_ == 1;
+
+  # Name and values (odd)
+  return shift, @_ if @_ % 2;
+
+  # Name and hash or just values (even)
+  return ref $_[1] eq 'HASH' ? (shift, %{shift()}) : (undef, @_);
+}
+
+sub _stash {
+  my ($name, $object) = (shift, shift);
+
+  # Hash
+  my $dict = $object->{$name} ||= {};
+  return $dict unless @_;
+
+  # Get
+  return $dict->{$_[0]} unless @_ > 1 || ref $_[0];
+
+  # Set
+  my $values = ref $_[0] ? $_[0] : {@_};
+  @$dict{keys %$values} = values %$values;
+
+  return $object;
+}
+
+sub _teardown {
+  return unless my $class = shift;
+
+  # @ISA has to be cleared first because of circular references
+  no strict 'refs';
+  @{"${class}::ISA"} = ();
+  delete_package $class;
+}
+
 1;
 
 =encoding utf8
@@ -394,7 +447,8 @@ L<Mojo::Util> provides portable utility functions for L<Mojo>.
 
 =head1 FUNCTIONS
 
-L<Mojo::Util> implements the following functions.
+L<Mojo::Util> implements the following functions, which can be imported
+individually.
 
 =head2 b64_decode
 
@@ -480,7 +534,7 @@ Decode bytes to characters and return C<undef> if decoding failed.
   deprecated 'foo is DEPRECATED in favor of bar';
 
 Warn about deprecated feature from perspective of caller. You can also set the
-MOJO_FATAL_DEPRECATIONS environment variable to make them die instead.
+C<MOJO_FATAL_DEPRECATIONS> environment variable to make them die instead.
 
 =head2 dumper
 
@@ -493,13 +547,6 @@ Dump a Perl data structure with L<Data::Dumper>.
   my $bytes = encode 'UTF-8', $chars;
 
 Encode characters to bytes.
-
-=head2 get_line
-
-  my $line = get_line \$str;
-
-Extract whole line from string or return C<undef>. Lines are expected to end
-with C<0x0d 0x0a> or C<0x0a>.
 
 =head2 hmac_sha1_sum
 
@@ -541,13 +588,15 @@ Monkey patch functions into package.
 
   my $str = punycode_decode $punycode;
 
-Punycode decode string.
+Punycode decode string as described in
+L<RFC 3492|http://tools.ietf.org/html/rfc3492>.
 
 =head2 punycode_encode
 
   my $punycode = punycode_encode $str;
 
-Punycode encode string.
+Punycode encode string as described in
+L<RFC 3492|http://tools.ietf.org/html/rfc3492>.
 
 =head2 quote
 
@@ -611,14 +660,30 @@ consecutive groups of whitespace into one space each.
 
   my $time = steady_time;
 
-High resolution time, resilient to time jumps if a monotonic clock is
-available through L<Time::HiRes>.
+High resolution time elapsed from an arbitrary fixed point in the past,
+resilient to time jumps if a monotonic clock is available through
+L<Time::HiRes>.
+
+=head2 tablify
+
+  my $table = tablify [['foo', 'bar'], ['baz', 'yada']];
+
+Row-oriented generator for text tables.
+
+  # "foo   bar\nyada  yada\nbaz   yada\n"
+  tablify [['foo', 'bar'], ['yada', 'yada'], ['baz', 'yada']];
 
 =head2 trim
 
   my $trimmed = trim $str;
 
 Trim whitespace characters from both ends of string.
+
+=head2 unindent
+
+  my $unindented = unindent $str;
+
+Unindent multiline string.
 
 =head2 unquote
 
@@ -631,14 +696,16 @@ Unquote string.
   my $escaped = url_escape $str;
   my $escaped = url_escape $str, '^A-Za-z0-9\-._~';
 
-Percent encode unsafe characters in string, the pattern used defaults to
+Percent encode unsafe characters in string as described in
+L<RFC 3986|http://tools.ietf.org/html/rfc3986>, the pattern used defaults to
 C<^A-Za-z0-9\-._~>.
 
 =head2 url_unescape
 
   my $str = url_unescape $escaped;
 
-Decode percent encoded characters in string.
+Decode percent encoded characters in string as described in
+L<RFC 3986|http://tools.ietf.org/html/rfc3986>.
 
 =head2 xml_escape
 

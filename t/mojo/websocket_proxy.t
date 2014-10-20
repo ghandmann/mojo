@@ -15,23 +15,23 @@ use Mojolicious::Lite;
 app->log->level('fatal');
 
 get '/' => sub {
-  my $self = shift;
-  my $rel  = $self->req->url;
-  my $abs  = $rel->to_abs;
-  $self->render(text => "Hello World! $rel $abs");
+  my $c   = shift;
+  my $rel = $c->req->url;
+  my $abs = $rel->to_abs;
+  $c->render(text => "Hello World! $rel $abs");
 };
 
 get '/proxy' => sub {
-  my $self = shift;
-  $self->render(text => $self->req->url);
+  my $c = shift;
+  $c->render(text => $c->req->url);
 };
 
 websocket '/test' => sub {
-  my $self = shift;
-  $self->on(
+  my $c = shift;
+  $c->on(
     message => sub {
-      my ($self, $msg) = @_;
-      $self->send("${msg}test2");
+      my ($c, $msg) = @_;
+      $c->send("${msg}test2");
     }
   );
 };
@@ -39,19 +39,18 @@ websocket '/test' => sub {
 # HTTP server for testing
 my $ua = Mojo::UserAgent->new(ioloop => Mojo::IOLoop->singleton);
 my $daemon = Mojo::Server::Daemon->new(app => app, silent => 1);
-my $port = Mojo::IOLoop->new->generate_port;
-$daemon->listen(["http://127.0.0.1:$port"])->start;
+$daemon->listen(['http://127.0.0.1'])->start;
+my $port = Mojo::IOLoop->acceptor($daemon->acceptors->[0])->handle->sockport;
 
 # CONNECT proxy server for testing
-my $proxy = Mojo::IOLoop->generate_port;
 my (%buffer, $connected, $read, $sent);
 my $nf
   = "HTTP/1.1 404 NOT FOUND\x0d\x0a"
   . "Content-Length: 0\x0d\x0a"
   . "Connection: close\x0d\x0a\x0d\x0a";
-my $ok = "HTTP/1.1 200 OK\x0d\x0aConnection: keep-alive\x0d\x0a\x0d\x0a";
-Mojo::IOLoop->server(
-  {address => '127.0.0.1', port => $proxy} => sub {
+my $ok = "HTTP/1.0 201 BAR\x0d\x0aX-Something: unimportant\x0d\x0a\x0d\x0a";
+my $id = Mojo::IOLoop->server(
+  {address => '127.0.0.1'} => sub {
     my ($loop, $stream, $client) = @_;
 
     # Connection to client
@@ -119,6 +118,7 @@ Mojo::IOLoop->server(
     );
   }
 );
+my $proxy = Mojo::IOLoop->acceptor($id)->handle->sockport;
 
 # Normal non-blocking request
 my $result;
@@ -230,6 +230,6 @@ $ua->websocket(
 );
 Mojo::IOLoop->start;
 ok !$success, 'no success';
-is $err, 'Proxy connection failed', 'right message';
+is $err->{message}, 'Proxy connection failed', 'right message';
 
 done_testing();

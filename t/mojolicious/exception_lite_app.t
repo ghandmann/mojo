@@ -21,12 +21,27 @@ app->log->on(message => sub { shift; $log .= join ':', @_ });
 
 helper dead_helper => sub { die "dead helper!\n" };
 
+# Custom rendering for missing "txt" template
+hook before_render => sub {
+  my ($c, $args) = @_;
+  return unless ($args->{template} // '') eq 'not_found';
+  my $exception = $c->stash('snapshot')->{exception};
+  $args->{text} = "Missing template, $exception." if $args->{format} eq 'txt';
+};
+
+# Custom exception rendering for "txt"
+hook before_render => sub {
+  my ($c, $args) = @_;
+  @$args{qw(text format)} = ($c->stash('exception'), 'txt')
+    if ($args->{template} // '') eq 'exception' && $c->accepts('txt');
+};
+
 get '/logger' => sub {
-  my $self  = shift;
-  my $level = $self->param('level');
-  my $msg   = $self->param('message');
-  $self->app->log->log($level => $msg);
-  $self->render(text => "$level: $msg");
+  my $c     = shift;
+  my $level = $c->param('level');
+  my $msg   = $c->param('message');
+  $c->app->log->log($level => $msg);
+  $c->render(text => "$level: $msg");
 };
 
 get '/dead_template';
@@ -35,7 +50,7 @@ get '/dead_included_template';
 
 get '/dead_template_with_layout';
 
-get '/dead_action' => sub { die 'dead action!' };
+get '/dead_action' => sub { die "dead action!\n" };
 
 get '/double_dead_action_☃' => sub {
   eval { die 'double dead action!' };
@@ -43,18 +58,19 @@ get '/double_dead_action_☃' => sub {
 };
 
 get '/trapped' => sub {
-  my $self = shift;
+  my $c = shift;
   eval { die {foo => 'bar'} };
-  $self->render(text => $@->{foo} || 'failed');
+  $c->render(text => $@->{foo} || 'failed');
 };
 
-get '/missing_template';
+get '/missing_template' => {exception => 'whatever'};
 
 get '/missing_template/too' => sub {
-  my $self = shift;
-  $self->render('does_not_exist')
-    or $self->res->headers->header('X-Not-Found' => 1);
+  my $c = shift;
+  $c->render('does_not_exist') or $c->res->headers->header('X-Not-Found' => 1);
 };
+
+get '/missing_helper' => sub { shift->missing_helper };
 
 # Dummy exception object
 package MyException;
@@ -66,9 +82,9 @@ has 'error';
 package main;
 
 get '/trapped/too' => sub {
-  my $self = shift;
+  my $c = shift;
   eval { die MyException->new(error => 'works') };
-  $self->render(text => "$@" || 'failed');
+  $c->render(text => "$@" || 'failed');
 };
 
 # Reuse exception and snapshot
@@ -136,7 +152,7 @@ $t->get_ok('/dead_template')->status_is(500)->content_like(qr/dead template!/)
   ->content_like(qr/line 1/);
 like $log, qr/dead template!/, 'right result';
 
-# Dead partial template
+# Dead included template
 $t->get_ok('/dead_included_template')->status_is(500)
   ->content_like(qr/dead template!/)->content_like(qr/line 1/);
 
@@ -149,7 +165,7 @@ like $log, qr/dead template with layout!/, 'right result';
 $t->get_ok('/dead_action')->status_is(500)
   ->content_type_is('text/html;charset=UTF-8')
   ->content_like(qr!get &#39;/dead_action&#39;!)
-  ->content_like(qr/dead action!/);
+  ->content_like(qr/dead action!/)->text_is('#error' => "dead action!\n");
 like $log, qr/dead action!/, 'right result';
 
 # Dead action with different format
@@ -161,6 +177,10 @@ $t->get_ok('/dead_action.json')->status_is(500)
   ->content_type_is('text/html;charset=UTF-8')
   ->content_like(qr!get &#39;/dead_action&#39;!)
   ->content_like(qr/dead action!/);
+
+# Dead action with custom exception rendering
+$t->get_ok('/dead_action' => {Accept => 'text/plain'})->status_is(500)
+  ->content_type_is('text/plain;charset=UTF-8')->content_is("dead action!\n");
 
 # Action dies twice
 $t->get_ok('/double_dead_action_☃')->status_is(500)
@@ -194,10 +214,20 @@ $t->get_ok('/missing_template.json')->status_is(404)
   ->content_type_is('text/html;charset=UTF-8')
   ->content_like(qr/Page not found/);
 
+# Missing template with custom rendering
+$t->get_ok('/missing_template.txt')->status_is(404)
+  ->content_type_is('text/plain;charset=UTF-8')
+  ->content_is('Missing template, whatever.');
+
 # Missing template (failed rendering)
 $t->get_ok('/missing_template/too')->status_is(404)
   ->header_is('X-Not-Found' => 1)->content_type_is('text/html;charset=UTF-8')
   ->content_like(qr/Page not found/);
+
+# Missing helper (correct context)
+$t->get_ok('/missing_helper')->status_is(500)
+  ->content_type_is('text/html;charset=UTF-8')->content_like(qr/Server error/)
+  ->content_like(qr/shift-&gt;missing_helper/);
 
 # Reuse exception
 ok !$exception, 'no exception';

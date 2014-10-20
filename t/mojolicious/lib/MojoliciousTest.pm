@@ -38,7 +38,7 @@ sub startup {
   # Templateless renderer
   $self->renderer->add_handler(
     test => sub {
-      my ($self, $c, $output) = @_;
+      my ($renderer, $c, $output) = @_;
       $$output = 'Hello Mojo from a templateless renderer!';
     }
   );
@@ -88,7 +88,7 @@ sub startup {
   # /somethingtest (refer to another route with url_for)
   $r->route('/somethingtest')->to('foo#something');
 
-  # /something_missing (refer to a non existing route with url_for)
+  # /something_missing (refer to a non-existing route with url_for)
   $r->route('/something_missing')->to('foo#url_for_missing');
 
   # /test3 (no class, just a namespace)

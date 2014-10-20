@@ -2,16 +2,12 @@ package Mojo::IOLoop::Stream;
 use Mojo::Base 'Mojo::EventEmitter';
 
 use Errno qw(EAGAIN ECONNRESET EINTR EPIPE EWOULDBLOCK);
+use Mojo::IOLoop;
 use Scalar::Util 'weaken';
 
-has reactor => sub {
-  require Mojo::IOLoop;
-  Mojo::IOLoop->singleton->reactor;
-};
+has reactor => sub { Mojo::IOLoop->singleton->reactor };
 
 sub DESTROY { shift->close }
-
-sub new { shift->SUPER::new(handle => shift, buffer => '', timeout => 15) }
 
 sub close {
   my $self = shift;
@@ -20,7 +16,7 @@ sub close {
   return unless my $handle  = delete $self->timeout(0)->{handle};
   $reactor->remove($handle);
   close $handle;
-  $self->emit_safe('close');
+  $self->emit('close');
 }
 
 sub close_gracefully {
@@ -42,6 +38,8 @@ sub is_writing {
   return undef unless $self->{handle};
   return !!length($self->{buffer}) || $self->has_subscribers('drain');
 }
+
+sub new { shift->SUPER::new(handle => shift, buffer => '', timeout => 15) }
 
 sub start {
   my $self = shift;
@@ -78,7 +76,7 @@ sub timeout {
   return $self unless my $timeout = $self->{timeout} = shift;
   weaken $self;
   $self->{timer}
-    = $reactor->timer($timeout => sub { $self->emit_safe('timeout')->close });
+    = $reactor->timer($timeout => sub { $self->emit('timeout')->close });
 
   return $self;
 }
@@ -88,7 +86,7 @@ sub write {
 
   $self->{buffer} .= $chunk;
   if ($cb) { $self->once(drain => $cb) }
-  else     { return $self unless length $self->{buffer} }
+  elsif (!length $self->{buffer}) { return $self }
   $self->reactor->watch($self->{handle}, !$self->{paused}, 1)
     if $self->{handle};
 
@@ -115,7 +113,7 @@ sub _read {
   my $read = $self->{handle}->sysread(my $buffer, 131072, 0);
   return $self->_error unless defined $read;
   return $self->close if $read == 0;
-  $self->emit_safe(read => $buffer)->_again;
+  $self->emit(read => $buffer)->_again;
 }
 
 sub _write {
@@ -125,13 +123,12 @@ sub _write {
   if (length $self->{buffer}) {
     my $written = $handle->syswrite($self->{buffer});
     return $self->_error unless defined $written;
-    $self->emit_safe(write => substr($self->{buffer}, 0, $written, ''));
-    $self->_again;
+    $self->emit(write => substr($self->{buffer}, 0, $written, ''))->_again;
   }
 
-  $self->emit_safe('drain') unless length $self->{buffer};
-  return if $self->is_writing;
-  return $self->close if $self->{graceful};
+  $self->emit('drain') if !length $self->{buffer};
+  return               if $self->is_writing;
+  return $self->close  if $self->{graceful};
   $self->reactor->watch($handle, !$self->{paused}, 0) if $self->{handle};
 }
 
@@ -186,7 +183,7 @@ emit the following new ones.
     ...
   });
 
-Emitted safely if the stream gets closed.
+Emitted if the stream gets closed.
 
 =head2 drain
 
@@ -195,7 +192,7 @@ Emitted safely if the stream gets closed.
     ...
   });
 
-Emitted safely once all data has been written.
+Emitted once all data has been written.
 
 =head2 error
 
@@ -213,7 +210,7 @@ Emitted if an error occurs on the stream, fatal if unhandled.
     ...
   });
 
-Emitted safely if new data arrives on the stream.
+Emitted if new data arrives on the stream.
 
 =head2 timeout
 
@@ -222,8 +219,8 @@ Emitted safely if new data arrives on the stream.
     ...
   });
 
-Emitted safely if the stream has been inactive for too long and will get
-closed automatically.
+Emitted if the stream has been inactive for too long and will get closed
+automatically.
 
 =head2 write
 
@@ -232,7 +229,7 @@ closed automatically.
     ...
   });
 
-Emitted safely if new data has been written to the stream.
+Emitted if new data has been written to the stream.
 
 =head1 ATTRIBUTES
 
@@ -243,19 +240,13 @@ L<Mojo::IOLoop::Stream> implements the following attributes.
   my $reactor = $stream->reactor;
   $stream     = $stream->reactor(Mojo::Reactor::Poll->new);
 
-Low level event reactor, defaults to the C<reactor> attribute value of the
+Low-level event reactor, defaults to the C<reactor> attribute value of the
 global L<Mojo::IOLoop> singleton.
 
 =head1 METHODS
 
 L<Mojo::IOLoop::Stream> inherits all methods from L<Mojo::EventEmitter> and
 implements the following new ones.
-
-=head2 new
-
-  my $stream = Mojo::IOLoop::Stream->new($handle);
-
-Construct a new L<Mojo::IOLoop::Stream> object.
 
 =head2 close
 
@@ -287,6 +278,12 @@ sockets.
   my $bool = $stream->is_writing;
 
 Check if stream is writing.
+
+=head2 new
+
+  my $stream = Mojo::IOLoop::Stream->new($handle);
+
+Construct a new L<Mojo::IOLoop::Stream> object.
 
 =head2 start
 

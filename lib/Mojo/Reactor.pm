@@ -2,7 +2,7 @@ package Mojo::Reactor;
 use Mojo::Base 'Mojo::EventEmitter';
 
 use Carp 'croak';
-use IO::Poll qw(POLLERR POLLHUP POLLIN);
+use IO::Poll qw(POLLIN POLLPRI);
 use Mojo::Loader;
 
 sub again { croak 'Method "again" not implemented by subclass' }
@@ -14,26 +14,23 @@ sub detect {
 
 sub io { croak 'Method "io" not implemented by subclass' }
 
+# This may break at some point in the future, but is worth it for performance
 sub is_readable {
-  my ($self, $handle) = @_;
-
-  my $test = $self->{test} ||= IO::Poll->new;
-  $test->mask($handle, POLLIN);
-  $test->poll(0);
-  my $result = $test->handles(POLLIN | POLLERR | POLLHUP);
-  $test->remove($handle);
-
-  return !!$result;
+  !(IO::Poll::_poll(0, fileno(pop), my $dummy = POLLIN | POLLPRI) == 0);
 }
 
 sub is_running { croak 'Method "is_running" not implemented by subclass' }
-sub one_tick   { croak 'Method "one_tick" not implemented by subclass' }
-sub recurring  { croak 'Method "recurring" not implemented by subclass' }
-sub remove     { croak 'Method "remove" not implemented by subclass' }
-sub start      { croak 'Method "start" not implemented by subclass' }
-sub stop       { croak 'Method "stop" not implemented by subclass' }
-sub timer      { croak 'Method "timer" not implemented by subclass' }
-sub watch      { croak 'Method "watch" not implemented by subclass' }
+
+sub next_tick { shift->timer(0 => @_) and return undef }
+
+sub one_tick  { croak 'Method "one_tick" not implemented by subclass' }
+sub recurring { croak 'Method "recurring" not implemented by subclass' }
+sub remove    { croak 'Method "remove" not implemented by subclass' }
+sub reset     { croak 'Method "reset" not implemented by subclass' }
+sub start     { croak 'Method "start" not implemented by subclass' }
+sub stop      { croak 'Method "stop" not implemented by subclass' }
+sub timer     { croak 'Method "timer" not implemented by subclass' }
+sub watch     { croak 'Method "watch" not implemented by subclass' }
 
 1;
 
@@ -41,7 +38,7 @@ sub watch      { croak 'Method "watch" not implemented by subclass' }
 
 =head1 NAME
 
-Mojo::Reactor - Low level event reactor base class
+Mojo::Reactor - Low-level event reactor base class
 
 =head1 SYNOPSIS
 
@@ -56,6 +53,7 @@ Mojo::Reactor - Low level event reactor base class
   sub one_tick   {...}
   sub recurring  {...}
   sub remove     {...}
+  sub reset      {...}
   sub start      {...}
   sub stop       {...}
   sub timer      {...}
@@ -63,7 +61,7 @@ Mojo::Reactor - Low level event reactor base class
 
 =head1 DESCRIPTION
 
-L<Mojo::Reactor> is an abstract base class for low level event reactors.
+L<Mojo::Reactor> is an abstract base class for low-level event reactors.
 
 =head1 EVENTS
 
@@ -102,7 +100,7 @@ Restart active timer. Meant to be overloaded in a subclass.
   my $class = Mojo::Reactor->detect;
 
 Detect and load the best reactor implementation available, will try the value
-of the MOJO_REACTOR environment variable, L<Mojo::Reactor::EV> or
+of the C<MOJO_REACTOR> environment variable, L<Mojo::Reactor::EV> or
 L<Mojo::Reactor::Poll>.
 
   # Instantiate best reactor implementation available
@@ -134,6 +132,13 @@ tainted sockets.
 
 Check if reactor is running. Meant to be overloaded in a subclass.
 
+=head2 next_tick
+
+  my $undef = $reactor->next_tick(sub {...});
+
+Invoke callback as soon as possible, but not before returning, always returns
+C<undef>.
+
 =head2 one_tick
 
   $reactor->one_tick;
@@ -153,15 +158,18 @@ the reactor, so you need to be careful. Meant to be overloaded in a subclass.
 Create a new recurring timer, invoking the callback repeatedly after a given
 amount of time in seconds. Meant to be overloaded in a subclass.
 
-  # Invoke as soon as possible
-  $reactor->recurring(0 => sub { say 'Reactor tick.' });
-
 =head2 remove
 
   my $bool = $reactor->remove($handle);
   my $bool = $reactor->remove($id);
 
 Remove handle or timer. Meant to be overloaded in a subclass.
+
+=head2 reset
+
+  $reactor->reset;
+
+Remove all handles and timers. Meant to be overloaded in a subclass.
 
 =head2 start
 
@@ -183,9 +191,6 @@ Stop watching for I/O and timer events. Meant to be overloaded in a subclass.
 
 Create a new timer, invoking the callback after a given amount of time in
 seconds. Meant to be overloaded in a subclass.
-
-  # Invoke as soon as possible
-  $reactor->timer(0 => sub { say 'Next tick.' });
 
 =head2 watch
 

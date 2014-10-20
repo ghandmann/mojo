@@ -1,38 +1,21 @@
 package Mojolicious::Command::test;
 use Mojo::Base 'Mojolicious::Command';
 
-use Cwd 'realpath';
-use FindBin;
-use File::Spec::Functions qw(abs2rel catdir splitdir);
 use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
-use Mojo::Home;
 
-has description => "Run unit tests.\n";
-has usage       => <<EOF;
-usage: $0 test [OPTIONS] [TESTS]
-
-These options are available:
-  -v, --verbose   Print verbose debug information to STDERR.
-EOF
+has description => 'Run tests.';
+has usage => sub { shift->extract_usage };
 
 sub run {
   my ($self, @args) = @_;
 
-  GetOptionsFromArray \@args, 'v|verbose' => sub { $ENV{HARNESS_VERBOSE} = 1 };
+  GetOptionsFromArray \@args, 'v|verbose' => \$ENV{HARNESS_VERBOSE};
 
-  unless (@args) {
-    my @base = splitdir(abs2rel $FindBin::Bin);
-
-    # "./t"
-    my $path = catdir @base, 't';
-
-    # "../t"
-    $path = catdir @base, '..', 't' unless -d $path;
-    die "Can't find test directory.\n" unless -d $path;
-
-    my $home = Mojo::Home->new($path);
-    /\.t$/ and push @args, $home->rel_file($_) for @{$home->list_files};
-    say "Running tests from '", realpath($path), "'.";
+  if (!@args && (my $home = $self->app->home)) {
+    die "Can't find test directory.\n" unless -d $home->rel_dir('t');
+    my $files = $home->list_files('t');
+    /\.t$/ and push @args, $home->rel_file("t/$_") for @$files;
+    say qq{Running tests from "}, $home->rel_dir('t') . '".';
   }
 
   $ENV{HARNESS_OPTIONS} //= 'c';
@@ -50,10 +33,14 @@ Mojolicious::Command::test - Test command
 
 =head1 SYNOPSIS
 
-  use Mojolicious::Command::test;
+  Usage: APPLICATION test [OPTIONS] [TESTS]
 
-  my $test = Mojolicious::Command::test->new;
-  $test->run(@ARGV);
+    ./myapp.pl test -v
+    ./myapp.pl test t/foo.t
+    ./myapp.pl test t/foo/*.t
+
+  Options:
+    -v, --verbose   Print verbose debug information to STDERR.
 
 =head1 DESCRIPTION
 
@@ -61,6 +48,9 @@ L<Mojolicious::Command::test> runs application tests from the C<t> directory.
 
 This is a core command, that means it is always enabled and its code a good
 example for learning to build new commands, you're welcome to fork it.
+
+See L<Mojolicious::Commands/"COMMANDS"> for a list of commands that are
+available by default.
 
 =head1 ATTRIBUTES
 

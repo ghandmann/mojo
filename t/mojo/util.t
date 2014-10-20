@@ -10,10 +10,11 @@ use Mojo::DeprecationTest;
 
 use Mojo::Util
   qw(b64_decode b64_encode camelize class_to_file class_to_path decamelize),
-  qw(decode dumper encode get_line hmac_sha1_sum html_unescape md5_bytes),
-  qw(md5_sum monkey_patch punycode_decode punycode_encode quote),
+  qw(decode dumper encode hmac_sha1_sum html_unescape md5_bytes md5_sum),
+  qw(monkey_patch punycode_decode punycode_encode quote secure_compare),
   qw(secure_compare sha1_bytes sha1_sum slurp split_header spurt squish),
-  qw(steady_time trim unquote url_escape url_unescape xml_escape xor_encode);
+  qw(steady_time tablify trim unindent unquote url_escape url_unescape),
+  qw(xml_escape xor_encode);
 
 # camelize
 is camelize('foo_bar_baz'), 'FooBarBaz', 'right camelized result';
@@ -48,16 +49,6 @@ is class_to_path("Foo::Bar'Baz"),  'Foo/Bar/Baz.pm', 'right path';
 is class_to_path("Foo::Bar::Baz"), 'Foo/Bar/Baz.pm', 'right path';
 is class_to_path("Foo'Bar'Baz"),   'Foo/Bar/Baz.pm', 'right path';
 
-# get_line
-my $buffer = "foo\x0d\x0abar\x0dbaz\x0ayada\x0d\x0a";
-is get_line(\$buffer), 'foo', 'right line';
-is $buffer, "bar\x0dbaz\x0ayada\x0d\x0a", 'right buffer content';
-is get_line(\$buffer), "bar\x0dbaz", 'right line';
-is $buffer, "yada\x0d\x0a", 'right buffer content';
-is get_line(\$buffer), 'yada', 'right line';
-is $buffer, '', 'no buffer content';
-is get_line(\$buffer), undef, 'no line';
-
 # split_header
 is_deeply split_header(''), [], 'right result';
 is_deeply split_header('foo=b=a=r'), [['foo', 'b=a=r']], 'right result';
@@ -76,8 +67,8 @@ is_deeply split_header('f "o" o , ba  r'),
   'right result';
 is_deeply split_header('foo="b,; a\" r\"\\\\"'), [['foo', 'b,; a" r"\\']],
   'right result';
-is_deeply split_header('foo = "b a\" r\"\\\\"'), [['foo', 'b a" r"\\']],
-  'right result';
+is_deeply split_header('foo = "b a\" r\"\\\\"; bar="ba z"'),
+  [['foo', 'b a" r"\\', 'bar', 'ba z']], 'right result';
 my $header = q{</foo/bar>; rel="x"; t*=UTF-8'de'a%20b};
 my $tree = [['</foo/bar>', undef, 'rel', 'x', 't*', 'UTF-8\'de\'a%20b']];
 is_deeply split_header($header), $tree, 'right result';
@@ -91,25 +82,44 @@ $tree   = [
 ];
 is_deeply split_header($header), $tree, 'right result';
 
+# unindent
+is unindent(" test\n  123\n 456\n"), "test\n 123\n456\n",
+  'right unindented result';
+is unindent("\ttest\n\t\t123\n\t456\n"), "test\n\t123\n456\n",
+  'right unindented result';
+is unindent("\t \ttest\n\t \t\t123\n\t \t456\n"), "test\n\t123\n456\n",
+  'right unindented result';
+is unindent("\n\n\n test\n  123\n 456\n"), "\n\n\ntest\n 123\n456\n",
+  'right unindented result';
+is unindent("   test\n    123\n   456\n"), "test\n 123\n456\n",
+  'right unindented result';
+is unindent("    test\n  123\n   456\n"), "  test\n123\n 456\n",
+  'right unindented result';
+is unindent("test\n123\n"),     "test\n123\n",   'right unindented result';
+is unindent(" test\n\n 123\n"), "test\n\n123\n", 'right unindented result';
+is unindent('  test'),          'test',          'right unindented result';
+is unindent(" te st\r\n\r\n  1 2 3\r\n 456\r\n"),
+  "te st\r\n\r\n 1 2 3\r\n456\r\n", 'right unindented result';
+
 # b64_encode
 is b64_encode('foobar$%^&3217'), "Zm9vYmFyJCVeJjMyMTc=\n",
-  'right base64 encoded result';
+  'right Base64 encoded result';
 
 # b64_decode
 is b64_decode("Zm9vYmFyJCVeJjMyMTc=\n"), 'foobar$%^&3217',
-  'right base64 decoded result';
+  'right Base64 decoded result';
 
 # b64_encode (UTF-8)
 is b64_encode(encode 'UTF-8', "foo\x{df}\x{0100}bar%23\x{263a}"),
-  "Zm9vw5/EgGJhciUyM+KYug==\n", 'right base64 encoded result';
+  "Zm9vw5/EgGJhciUyM+KYug==\n", 'right Base64 encoded result';
 
 # b64_decode (UTF-8)
 is decode('UTF-8', b64_decode "Zm9vw5/EgGJhciUyM+KYug==\n"),
-  "foo\x{df}\x{0100}bar%23\x{263a}", 'right base64 decoded result';
+  "foo\x{df}\x{0100}bar%23\x{263a}", 'right Base64 decoded result';
 
 # b64_encode (custom line ending)
 is b64_encode('foobar$%^&3217', ''), 'Zm9vYmFyJCVeJjMyMTc=',
-  'right base64 encoded result';
+  'right Base64 encoded result';
 
 # decode (invalid UTF-8)
 is decode('UTF-8', "\x{1000}"), undef, 'decoding invalid UTF-8 worked';
@@ -123,65 +133,65 @@ eval { encode('does_not_exist', '') };
 like $@, qr/Unknown encoding 'does_not_exist'/, 'right error';
 
 # url_escape
-is url_escape('business;23'), 'business%3B23', 'right url escaped result';
+is url_escape('business;23'), 'business%3B23', 'right URL escaped result';
 
 # url_escape (custom pattern)
 is url_escape('&business;23', 's&'), '%26bu%73ine%73%73;23',
-  'right url escaped result';
+  'right URL escaped result';
 
 # url_escape (nothing to escape)
-is url_escape('foobar123-._~'), 'foobar123-._~', 'right url escaped result';
+is url_escape('foobar123-._~'), 'foobar123-._~', 'right URL escaped result';
 
 # url_unescape
-is url_unescape('business%3B23'), 'business;23', 'right url unescaped result';
+is url_unescape('business%3B23'), 'business;23', 'right URL unescaped result';
 
 # UTF-8 url_escape
 is url_escape(encode 'UTF-8', "foo\x{df}\x{0100}bar\x{263a}"),
-  'foo%C3%9F%C4%80bar%E2%98%BA', 'right url escaped result';
+  'foo%C3%9F%C4%80bar%E2%98%BA', 'right URL escaped result';
 
 # UTF-8 url_unescape
 is decode('UTF-8', url_unescape 'foo%C3%9F%C4%80bar%E2%98%BA'),
-  "foo\x{df}\x{0100}bar\x{263a}", 'right url unescaped result';
+  "foo\x{df}\x{0100}bar\x{263a}", 'right URL unescaped result';
 
 # html_unescape
 is html_unescape('&#x3c;foo&#x3E;bar&lt;baz&gt;&#x0026;&#34;'),
-  "<foo>bar<baz>&\"", 'right html unescaped result';
+  "<foo>bar<baz>&\"", 'right HTML unescaped result';
 
 # html_unescape (special entities)
 is html_unescape(
   'foo &#x2603; &CounterClockwiseContourIntegral; bar &sup1baz'),
-  "foo ☃ \x{2233} bar \x{00b9}baz", 'right html unescaped result';
+  "foo ☃ \x{2233} bar \x{00b9}baz", 'right HTML unescaped result';
 
 # html_unescape (multi-character entity)
 is html_unescape(decode 'UTF-8', '&acE;'), "\x{223e}\x{0333}",
-  'right html unescaped result';
+  'right HTML unescaped result';
 
 # html_unescape (apos)
 is html_unescape('foobar&apos;&lt;baz&gt;&#x26;&#34;'), "foobar'<baz>&\"",
-  'right html unescaped result';
+  'right HTML unescaped result';
 
 # html_unescape (nothing to unescape)
-is html_unescape('foobar'), 'foobar', 'right html unescaped result';
+is html_unescape('foobar'), 'foobar', 'right HTML unescaped result';
 
 # html_unescape (relaxed)
 is html_unescape('&0&Ltf&amp&0oo&nbspba;&ltr'), "&0&Ltf&&0oo\x{00a0}ba;<r",
-  'right html unescaped result';
+  'right HTML unescaped result';
 
 # html_unescape (UTF-8)
 is html_unescape(decode 'UTF-8', 'foo&lt;baz&gt;&#x26;&#34;&OElig;&Foo;'),
-  "foo<baz>&\"\x{152}&Foo;", 'right html unescaped result';
+  "foo<baz>&\"\x{152}&Foo;", 'right HTML unescaped result';
 
 # xml_escape
 is xml_escape(qq{la<f>\nbar"baz"'yada\n'&lt;la}),
   "la&lt;f&gt;\nbar&quot;baz&quot;&#39;yada\n&#39;&amp;lt;la",
-  'right xml escaped result';
+  'right XML escaped result';
 
 # xml_escape (UTF-8 with nothing to escape)
-is xml_escape('привет'), 'привет', 'right xml escaped result';
+is xml_escape('привет'), 'привет', 'right XML escaped result';
 
 # xml_escape (UTF-8)
 is xml_escape('привет<foo>'), 'привет&lt;foo&gt;',
-  'right xml escaped result';
+  'right XML escaped result';
 
 # punycode_encode
 is punycode_encode('bücher'), 'bcher-kva', 'right punycode encoded result';
@@ -397,6 +407,26 @@ ok !!MojoMonkeyTest->can('yin'), 'function "yin" exists';
 is MojoMonkeyTest::yin(), 'yin', 'right result';
 ok !!MojoMonkeyTest->can('yang'), 'function "yang" exists';
 is MojoMonkeyTest::yang(), 'yang', 'right result';
+
+# monkey_patch (with name)
+SKIP: {
+  skip 'Sub::Util required!', 2 unless eval 'use Sub::Util; 1';
+  is Sub::Util::subname(MojoMonkeyTest->can('foo')), 'MojoMonkeyTest::foo',
+    'right name';
+  is Sub::Util::subname(MojoMonkeyTest->can('bar')), 'MojoMonkeyTest::bar',
+    'right name';
+}
+
+# tablify
+is tablify([["f\r\no o\r\n", 'bar']]),     "fo o  bar\n",      'right result';
+is tablify([["  foo",        '  b a r']]), "  foo    b a r\n", 'right result';
+is tablify([['foo']]), "foo\n", 'right result';
+is tablify([['foo', 'yada'], ['yada', 'yada']]), "foo   yada\nyada  yada\n",
+  'right result';
+is tablify([['foo', 'bar', 'baz'], ['yada', 'yada', 'yada']]),
+  "foo   bar   baz\nyada  yada  yada\n", 'right result';
+is tablify([['a', '', 'b'], ['c', '', 'd']]), "a    b\nc    d\n",
+  'right result';
 
 # deprecated
 {

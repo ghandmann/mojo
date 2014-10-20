@@ -52,8 +52,8 @@ get '/double_inheritance' =>
 get '/triple_inheritance';
 
 get '/nested-includes' => sub {
-  my $self = shift;
-  $self->render(
+  my $c = shift;
+  $c->render(
     template => 'nested-includes',
     layout   => 'layout',
     handler  => 'ep'
@@ -61,32 +61,32 @@ get '/nested-includes' => sub {
 };
 
 get '/localized/include' => sub {
-  my $self = shift;
-  $self->render('localized', test => 'foo', reverse => 1);
+  my $c = shift;
+  $c->render('localized', test => 'foo', reverse => 1);
 };
 
 get '/plain/reverse' => {text => 'Hello!', format => 'foo', reverse => 1};
 
 get '/outerlayout' => sub {
-  my $self = shift;
-  $self->render(template => 'outerlayout', layout => 'layout');
+  my $c = shift;
+  $c->render(template => 'outerlayout', layout => 'layout');
 };
 
 get '/outerextends' => sub {
-  my $self = shift;
-  $self->render(template => 'outerlayout', extends => 'layouts/layout');
+  my $c = shift;
+  $c->render(template => 'outerlayout', extends => 'layouts/layout');
 };
 
 get '/outerlayouttwo' => {layout => 'layout'} => sub {
-  my $self = shift;
-  is($self->stash->{layout}, 'layout', 'right value');
-  $self->render(handler => 'ep');
-  is($self->stash->{layout}, 'layout', 'right value');
+  my $c = shift;
+  is($c->stash->{layout}, 'layout', 'right value');
+  $c->render(handler => 'ep');
+  is($c->stash->{layout}, 'layout', 'right value');
 } => 'outerlayout';
 
 get '/outerinnerlayout' => sub {
-  my $self = shift;
-  $self->render(
+  my $c = shift;
+  $c->render(
     template => 'outerinnerlayout',
     layout   => 'layout',
     handler  => 'ep'
@@ -94,8 +94,8 @@ get '/outerinnerlayout' => sub {
 };
 
 get '/withblocklayout' => sub {
-  my $self = shift;
-  $self->render(template => 'index', layout => 'with_block', handler => 'epl');
+  my $c = shift;
+  $c->render(template => 'index', layout => 'with_block', handler => 'epl');
 };
 
 get '/content_for';
@@ -106,10 +106,16 @@ get '/inline/again' => {inline => 0};
 
 get '/data' => {data => 0};
 
+get '/variants' => {layout => 'variants'} => sub {
+  my $c = shift;
+  $c->stash->{variant} = $c->param('device');
+  $c->render('variants');
+};
+
 my $t = Test::Mojo->new;
 
 # "0" content reassignment
-my $c = $t->app->controller_class->new;
+my $c = $t->app->build_controller;
 $c->content(foo => '0');
 is $c->content('foo'), '0', 'right content';
 $c->content(foo => '1');
@@ -187,12 +193,12 @@ $t->get_ok('/triple_inheritance')->status_is(200)
 $t->get_ok('/plugin_with_template')->status_is(200)
   ->content_is("layout_with_template\nwith template\n\n");
 
-# Nested partial templates
+# Nested included templates
 $t->get_ok('/nested-includes')->status_is(200)
   ->header_is(Server => 'Mojolicious (Perl)')
-  ->content_is("layouted Nested Hello\n[\n  1,\n  2\n]\nthere<br>!\n\n\n\n");
+  ->content_is("layouted Nested <Hello>\n[\n  1,\n  2\n]\nthere<br>!\n\n\n\n");
 
-# Partial template with localized stash values
+# Included template with localized stash values
 $t->get_ok('/localized/include')->status_is(200)
   ->header_is(Server => 'Mojolicious (Perl)')
   ->content_type_is('text/html;charset=UTF-8')
@@ -206,19 +212,19 @@ $t->get_ok('/plain/reverse')->status_is(200)
 # Layout in render call
 $t->get_ok('/outerlayout')->status_is(200)
   ->header_is(Server => 'Mojolicious (Perl)')
-  ->content_is("layouted Hello\n[\n  1,\n  2\n]\nthere<br>!\n\n\n");
+  ->content_is("layouted <Hello>\n[\n  1,\n  2\n]\nthere<br>!\n\n\n");
 
 # Extends in render call
 $t->get_ok('/outerextends')->status_is(200)
   ->header_is(Server => 'Mojolicious (Perl)')
-  ->content_is("layouted Hello\n[\n  1,\n  2\n]\nthere<br>!\n\n\n");
+  ->content_is("layouted <Hello>\n[\n  1,\n  2\n]\nthere<br>!\n\n\n");
 
 # Layout in route
 $t->get_ok('/outerlayouttwo')->status_is(200)
   ->header_is(Server => 'Mojolicious (Perl)')
-  ->content_is("layouted Hello\n[\n  1,\n  2\n]\nthere<br>!\n\n\n");
+  ->content_is("layouted <Hello>\n[\n  1,\n  2\n]\nthere<br>!\n\n\n");
 
-# Partial template with layout
+# Included template with layout
 $t->get_ok('/outerinnerlayout')->status_is(200)
   ->header_is(Server => 'Mojolicious (Perl)')
   ->content_is("layouted Hello\nlayouted [\n  1,\n  2\n]\nthere<br>!\n\n\n\n");
@@ -244,6 +250,26 @@ $t->get_ok('/inline/again')->status_is(200)
 # "0" data
 $t->get_ok('/data')->status_is(200)->header_is(Server => 'Mojolicious (Perl)')
   ->content_is(0);
+
+# Variants (desktop)
+$t->get_ok('/variants.txt')->status_is(200)
+  ->content_type_is('text/plain;charset=UTF-8')
+  ->content_is('Variant: Desktop!');
+
+# Variants (tablet)
+$t->get_ok('/variants.txt?device=tablet')->status_is(200)
+  ->content_type_is('text/plain;charset=UTF-8')
+  ->content_is('Variant: Tablet!');
+
+# Variants (desktop fallback)
+$t->get_ok('/variants.txt?device=phone')->status_is(200)
+  ->content_type_is('text/plain;charset=UTF-8')
+  ->content_is('Variant: Desktop!');
+
+# Variants ("0")
+$t->get_ok('/variants.txt?device=0')->status_is(200)
+  ->content_type_is('text/plain;charset=UTF-8')
+  ->content_is('Another variant: Desktop!');
 
 done_testing();
 
@@ -283,7 +309,6 @@ Exception happened!
 Not found happened!
 
 @@ template_inheritance.html.ep
-% use Mojo::ByteStream 'b';
 % layout 'template_inheritance';
 % title 'Works!';
 <% content header => begin =%>
@@ -328,10 +353,10 @@ Nested <%= include 'outerlayout' %>
 @@ localized.html.ep
 % extends 'localized1';
 <%= $test %>
-<%= include 'localized_partial', test => 321, extends => 'localized2' %>
+<%= include 'localized_include', test => 321, extends => 'localized2' %>
 <%= $test %>
 
-@@ localized_partial.html.ep
+@@ localized_include.html.ep
 <%= $test %>
 
 @@ localized1.html.ep
@@ -341,8 +366,8 @@ localized1 <%= content %>
 localized2 <%= content %>
 
 @@ outerlayout.html.ep
-Hello
-<%= $self->render('outermenu', partial => 1) %>
+%= c(qw(> o l l e H <))->reverse->join
+<%= $c->render_to_string('outermenu') %>
 
 @@ outermenu.html.ep
 % stash test => 'there';
@@ -376,3 +401,15 @@ seems
 to
 <%= content_for 'message' %>
 work!
+
+@@ layouts/variants.txt.ep
+Variant: <%= content %>\
+
+@@ layouts/variants.txt+0.ep
+Another variant: <%= content %>\
+
+@@ variants.txt.ep
+Desktop!\
+
+@@ variants.txt+tablet.epl
+Tablet!\

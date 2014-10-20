@@ -18,30 +18,30 @@ package TestApp;
 use Mojolicious::Lite;
 
 get '/hello' => sub {
-  my $self    = shift;
-  my $name    = $self->stash('name');
-  my $counter = ++$self->session->{counter};
-  $self->render(text => "Hello from the $name ($counter) app!");
+  my $c       = shift;
+  my $name    = $c->stash('name');
+  my $counter = ++$c->session->{counter};
+  $c->render(text => "Hello from the $name ($counter) app!");
 };
 
 package MyTestApp::Test1;
 use Mojolicious::Lite;
 
 get '/yada' => sub {
-  my $self = shift;
-  my $name = $self->stash('name');
-  $self->render(text => "yada $name works!");
+  my $c    = shift;
+  my $name = $c->stash('name');
+  $c->render(text => "yada $name works!");
 };
 
 get '/bye' => sub {
-  my $self = shift;
-  my $name = $self->stash('name');
+  my $c    = shift;
+  my $name = $c->stash('name');
   my $nb   = '';
-  $self->ua->server->app(main::app());
-  $self->ua->get(
+  $c->ua->server->app(main::app());
+  $c->ua->get(
     '/hello/hello' => sub {
       my ($ua, $tx) = @_;
-      $self->render(text => $tx->res->body . "$name! $nb");
+      $c->render(text => $tx->res->body . "$name! $nb");
     }
   );
   $nb .= 'success!';
@@ -51,10 +51,10 @@ package MyTestApp::Test2;
 use Mojolicious::Lite;
 
 get '/' => sub {
-  my $self = shift;
-  my $name = $self->param('name');
-  my $url  = $self->url_for;
-  $self->render(text => "Bye from the $name app! $url!");
+  my $c    = shift;
+  my $name = $c->param('name');
+  my $url  = $c->url_for;
+  $c->render(text => "Bye from the $name app! $url!");
 };
 
 package MyTestApp::Basic;
@@ -81,6 +81,7 @@ plugin Mount => {'/x/1' => $external};
 my $route
   = plugin(Mount => ('/x/♥' => $external))->to(message => 'works 2!');
 is $route->to->{message}, 'works 2!', 'right message';
+is $route->pattern->defaults->{app}->same_name, 'myapp', 'right name';
 plugin Mount => {'/y/1'            => "$FindBin::Bin/external/myapp2.pl"};
 plugin Mount => {'mojolicious.org' => $external};
 plugin(Mount => ('/y/♥' => "$FindBin::Bin/external/myapp2.pl"))
@@ -171,6 +172,7 @@ $t->get_ok('/just/works/too')->status_is(200)->content_is("It just works!\n");
 
 # Template from myapp.pl
 $t->get_ok('/x/1/')->status_is(200)->content_is(<<'EOF');
+myapp
 works ♥!Insecure!Insecure!
 
 too!works!!!Mojolicious::Plugin::Config::Sandbox
@@ -192,17 +194,18 @@ $t->get_ok('/x/1/stream')->status_is(200)->content_is('hello!');
 
 # URL from myapp.pl
 $t->get_ok('/x/1/url/☃')->status_is(200)
-  ->content_is('/x/1/url/%E2%98%83 -> /x/1/%E2%98%83/stream!');
+  ->content_is('/x/1/url/%E2%98%83.json -> /x/1/%E2%98%83/stream!');
 
 # Route to template from myapp.pl
 $t->get_ok('/x/1/template/menubar')->status_is(200)
-  ->content_is("works ♥!Insecure!Insecure!\n");
+  ->content_is("myapp\nworks ♥!Insecure!Insecure!\n");
 
 # Missing template from myapp.pl
 $t->get_ok('/x/1/template/does_not_exist')->status_is(404);
 
 # Template from myapp.pl with unicode prefix
 $t->get_ok('/x/♥/')->status_is(200)->content_is(<<'EOF');
+myapp
 works ♥!Insecure!Insecure!
 
 too!works!!!Mojolicious::Plugin::Config::Sandbox
@@ -224,17 +227,23 @@ $t->get_ok('/x/♥/stream')->status_is(200)->content_is('hello!');
 
 # URL from myapp.pl with unicode prefix
 $t->get_ok('/x/♥/url/☃')->status_is(200)
-  ->content_is('/x/%E2%99%A5/url/%E2%98%83 -> /x/%E2%99%A5/%E2%98%83/stream!');
+  ->content_is(
+  '/x/%E2%99%A5/url/%E2%98%83.json -> /x/%E2%99%A5/%E2%98%83/stream!');
 
 # Route to template from myapp.pl with unicode prefix
 $t->get_ok('/x/♥/template/menubar')->status_is(200)
-  ->content_is("works ♥!Insecure!Insecure!\n");
+  ->content_is("myapp\nworks ♥!Insecure!Insecure!\n");
 
 # Missing template from myapp.pl with unicode prefix
 $t->get_ok('/x/♥/template/does_not_exist')->status_is(404);
 
 # A little bit of everything from myapp2.pl
-$t->get_ok('/y/1')->status_is(200)->content_is("works 4!\nInsecure too!");
+$t->get_ok('/y/1')->status_is(200)
+  ->content_is("myapp2\nworks 4!\nInsecure too!");
+
+# Route to template from myapp.pl again (helpers sharing the same name)
+$t->get_ok('/x/1/template/menubar')->status_is(200)
+  ->content_is("myapp\nworks ♥!Insecure!Insecure!\n");
 
 # Caching helper from myapp2.pl
 $t->get_ok('/y/1/cached?cache=foo')->status_is(200)->content_is('foo');
@@ -246,7 +255,8 @@ $t->get_ok('/y/1/cached?cache=fail')->status_is(200)->content_is('foo');
 $t->get_ok('/y/1/2')->status_is(404);
 
 # myapp2.pl with unicode prefix
-$t->get_ok('/y/♥')->status_is(200)->content_is("works 3!\nInsecure too!");
+$t->get_ok('/y/♥')->status_is(200)
+  ->content_is("myapp2\nworks 3!\nInsecure too!");
 
 # Caching helper from myapp2.pl with unicode prefix
 $t->get_ok('/y/♥/cached?cache=bar')->status_is(200)->content_is('bar');
@@ -263,6 +273,7 @@ $t->get_ok('/host')->status_is(200)->content_is('main application!');
 # Template from myapp.pl with domain
 $t->get_ok('/' => {Host => 'mojolicious.org'})->status_is(200)
   ->content_is(<<'EOF');
+myapp
 works ♥!Insecure!Insecure!
 
 too!works!!!Mojolicious::Plugin::Config::Sandbox
@@ -279,6 +290,7 @@ $t->get_ok('/host' => {Host => 'mojolicious.org'})->status_is(200)
 # Template from myapp.pl with domain again
 $t->get_ok('/' => {Host => 'mojolicio.us'})->status_is(200)
   ->content_is(<<'EOF');
+myapp
 works ♥!Insecure!Insecure!
 
 too!works!!!Mojolicious::Plugin::Config::Sandbox
@@ -295,6 +307,7 @@ $t->get_ok('/host' => {Host => 'mojolicio.us'})->status_is(200)
 # Template from myapp.pl with wildcard domain
 $t->get_ok('/' => {Host => 'example.com'})->status_is(200)
   ->content_is(<<'EOF');
+myapp
 works ♥!Insecure!Insecure!
 
 too!works!!!Mojolicious::Plugin::Config::Sandbox
@@ -319,6 +332,7 @@ $t->get_ok('/host' => {Host => 'foo.bar.example.com'})->status_is(200)
 # Template from myapp.pl with wildcard domain and unicode prefix
 $t->get_ok('/♥/123/' => {Host => 'foo-bar.de'})->status_is(200)
   ->content_is(<<'EOF');
+myapp
 works ♥!Insecure!Insecure!
 
 too!works!!!Mojolicious::Plugin::Config::Sandbox

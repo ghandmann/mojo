@@ -5,10 +5,13 @@ use Carp 'croak';
 use Compress::Raw::Zlib qw(WANT_GZIP Z_STREAM_END);
 use Mojo::Headers;
 
-has [qw(auto_relax relaxed skip_body)];
+has [qw(auto_relax expect_close relaxed skip_body)];
 has headers           => sub { Mojo::Headers->new };
 has max_buffer_size   => sub { $ENV{MOJO_MAX_BUFFER_SIZE} || 262144 };
 has max_leftover_size => sub { $ENV{MOJO_MAX_LEFTOVER_SIZE} || 262144 };
+
+my $BOUNDARY_RE
+  = qr!multipart.*boundary\s*=\s*(?:"([^"]+)"|([\w'(),.:?\-+/]+))!i;
 
 sub body_contains {
   croak 'Method "body_contains" not implemented by subclass';
@@ -17,10 +20,7 @@ sub body_contains {
 sub body_size { croak 'Method "body_size" not implemented by subclass' }
 
 sub boundary {
-  return undef unless my $type = shift->headers->content_type;
-  $type =~ m!multipart.*boundary\s*=\s*(?:"([^"]+)"|([\w'(),.:?\-+/]+))!i
-    and return $1 // $2;
-  return undef;
+  (shift->headers->content_type // '') =~ $BOUNDARY_RE ? $1 // $2 : undef;
 }
 
 sub build_body    { shift->_build('get_body_chunk') }
@@ -114,11 +114,11 @@ sub parse {
 
   # Relaxed parsing
   my $headers = $self->headers;
-  if ($self->auto_relax) {
-    my $connection = $headers->connection     // '';
-    my $len        = $headers->content_length // '';
+  my $len = $headers->content_length // '';
+  if ($self->auto_relax && !length $len) {
+    my $connection = lc($headers->connection // '');
     $self->relaxed(1)
-      if !length $len && ($connection =~ /close/i || $headers->content_type);
+      if $connection eq 'close' || (!$connection && $self->expect_close);
   }
 
   # Chunked or relaxed content
@@ -130,9 +130,8 @@ sub parse {
 
   # Normal content
   else {
-    my $len = $headers->content_length || 0;
     $self->{size} ||= 0;
-    if ((my $need = $len - $self->{size}) > 0) {
+    if ((my $need = ($len ||= 0) - $self->{size}) > 0) {
       my $len = length $self->{buffer};
       my $chunk = substr $self->{buffer}, 0, $need > $len ? $len : $need, '';
       $self->_uncompress($chunk);
@@ -180,8 +179,7 @@ sub write_chunk {
 sub _build {
   my ($self, $method) = @_;
 
-  my $buffer = '';
-  my $offset = 0;
+  my ($buffer, $offset) = ('', 0);
   while (1) {
 
     # No chunk yet, try again
@@ -201,7 +199,7 @@ sub _build_chunk {
   my ($self, $chunk) = @_;
 
   # End
-  return "\x0d\x0a0\x0d\x0a\x0d\x0a" if length $chunk == 0;
+  return "\x0d\x0a0\x0d\x0a\x0d\x0a" unless length $chunk;
 
   # First chunk has no leading CRLF
   my $crlf = $self->{chunks}++ ? "\x0d\x0a" : '';
@@ -240,7 +238,7 @@ sub _parse_chunked {
     if ($self->{chunk_state} // '') eq 'trailing_headers';
 
   # Check buffer size
-  $self->{limit} = $self->{state} = 'finished'
+  @$self{qw(state limit)} = ('finished', 1)
     if length($self->{pre_buffer} // '') > $self->max_buffer_size;
 }
 
@@ -286,7 +284,8 @@ sub _uncompress {
   my ($self, $chunk) = @_;
 
   # No compression
-  return $self->emit(read => $chunk) unless $self->is_compressed;
+  return $self->emit(read => $chunk)
+    unless $self->is_compressed && $self->auto_relax;
 
   # Uncompress
   $self->{post_buffer} .= $chunk;
@@ -300,7 +299,7 @@ sub _uncompress {
     if $status == Z_STREAM_END;
 
   # Check buffer size
-  $self->{limit} = $self->{state} = 'finished'
+  @$self{qw(state limit)} = ('finished', 1)
     if length($self->{post_buffer} // '') > $self->max_buffer_size;
 }
 
@@ -323,8 +322,9 @@ Mojo::Content - HTTP content base class
 
 =head1 DESCRIPTION
 
-L<Mojo::Content> is an abstract base class for HTTP content as described in
-RFC 2616.
+L<Mojo::Content> is an abstract base class for HTTP content based on
+L<RFC 7230|http://tools.ietf.org/html/rfc7230> and
+L<RFC 7231|http://tools.ietf.org/html/rfc7231>.
 
 =head1 EVENTS
 
@@ -385,6 +385,13 @@ L<Mojo::Content> implements the following attributes.
 
 Try to detect when relaxed parsing is necessary.
 
+=head2 expect_close
+
+  my $bool = $content->expect_close;
+  $content = $content->expect_close($bool);
+
+Expect a response that is terminated with a connection close.
+
 =head2 headers
 
   my $headers = $content->headers;
@@ -398,7 +405,7 @@ Content headers, defaults to a L<Mojo::Headers> object.
   $content = $content->max_buffer_size(1024);
 
 Maximum size in bytes of buffer for content parser, defaults to the value of
-the MOJO_MAX_BUFFER_SIZE environment variable or C<262144>.
+the C<MOJO_MAX_BUFFER_SIZE> environment variable or C<262144> (256KB).
 
 =head2 max_leftover_size
 
@@ -406,7 +413,8 @@ the MOJO_MAX_BUFFER_SIZE environment variable or C<262144>.
   $content = $content->max_leftover_size(1024);
 
 Maximum size in bytes of buffer for pipelined HTTP requests, defaults to the
-value of the MOJO_MAX_LEFTOVER_SIZE environment variable or C<262144>.
+value of the C<MOJO_MAX_LEFTOVER_SIZE> environment variable or C<262144>
+(256KB).
 
 =head2 relaxed
 
@@ -506,7 +514,7 @@ Check if content is chunked.
 
   my $bool = $content->is_compressed;
 
-Check if content is C<gzip> compressed.
+Check if content is gzip compressed.
 
 =head2 is_dynamic
 

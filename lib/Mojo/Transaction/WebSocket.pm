@@ -3,7 +3,7 @@ use Mojo::Base 'Mojo::Transaction';
 
 use Compress::Raw::Zlib 'Z_SYNC_FLUSH';
 use Config;
-use Mojo::JSON;
+use Mojo::JSON qw(encode_json j);
 use Mojo::Transaction::HTTP;
 use Mojo::Util qw(b64_encode decode encode sha1_bytes xor_encode);
 
@@ -18,59 +18,47 @@ use constant GUID => '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 # Opcodes
 use constant {
-  CONTINUATION => 0,
-  TEXT         => 1,
-  BINARY       => 2,
-  CLOSE        => 8,
-  PING         => 9,
-  PONG         => 10
+  CONTINUATION => 0x0,
+  TEXT         => 0x1,
+  BINARY       => 0x2,
+  CLOSE        => 0x8,
+  PING         => 0x9,
+  PONG         => 0xa
 };
 
 has [qw(compressed masked)];
-has context_takeover   => 1;
-has handshake          => sub { Mojo::Transaction::HTTP->new };
+has handshake => sub { Mojo::Transaction::HTTP->new };
 has max_websocket_size => sub { $ENV{MOJO_MAX_WEBSOCKET_SIZE} || 262144 };
-
-sub new {
-  my $self = shift->SUPER::new(@_);
-  $self->on(frame => sub { shift->_message(@_) });
-  return $self;
-}
 
 sub build_frame {
   my ($self, $fin, $rsv1, $rsv2, $rsv3, $op, $payload) = @_;
   warn "-- Building frame ($fin, $rsv1, $rsv2, $rsv3, $op)\n" if DEBUG;
 
   # Head
-  my $frame = 0b00000000;
-  vec($frame, 0, 8) = $op | 0b10000000 if $fin;
-  vec($frame, 0, 8) |= 0b01000000 if $rsv1;
-  vec($frame, 0, 8) |= 0b00100000 if $rsv2;
-  vec($frame, 0, 8) |= 0b00010000 if $rsv3;
+  my $head = $op + ($fin ? 128 : 0);
+  $head |= 0b01000000 if $rsv1;
+  $head |= 0b00100000 if $rsv2;
+  $head |= 0b00010000 if $rsv3;
+  my $frame = pack 'C', $head;
 
   # Small payload
   my $len    = length $payload;
-  my $prefix = 0;
   my $masked = $self->masked;
   if ($len < 126) {
     warn "-- Small payload ($len)\n$payload\n" if DEBUG;
-    vec($prefix, 0, 8) = $masked ? ($len | 0b10000000) : $len;
-    $frame .= $prefix;
+    $frame .= pack 'C', $masked ? ($len | 128) : $len;
   }
 
-  # Extended payload (16bit)
+  # Extended payload (16-bit)
   elsif ($len < 65536) {
-    warn "-- Extended 16bit payload ($len)\n$payload\n" if DEBUG;
-    vec($prefix, 0, 8) = $masked ? (126 | 0b10000000) : 126;
-    $frame .= $prefix;
-    $frame .= pack 'n', $len;
+    warn "-- Extended 16-bit payload ($len)\n$payload\n" if DEBUG;
+    $frame .= pack 'Cn', $masked ? (126 | 128) : 126, $len;
   }
 
-  # Extended payload (64bit with 32bit fallback)
+  # Extended payload (64-bit with 32-bit fallback)
   else {
-    warn "-- Extended 64bit payload ($len)\n$payload\n" if DEBUG;
-    vec($prefix, 0, 8) = $masked ? (127 | 0b10000000) : 127;
-    $frame .= $prefix;
+    warn "-- Extended 64-bit payload ($len)\n$payload\n" if DEBUG;
+    $frame .= pack 'C', $masked ? (127 | 128) : 127;
     $frame .= MODERN ? pack('Q>', $len) : pack('NN', 0, $len & 0xffffffff);
   }
 
@@ -90,7 +78,7 @@ sub build_message {
   $frame = {text => encode('UTF-8', $frame)} if ref $frame ne 'HASH';
 
   # JSON
-  $frame->{text} = Mojo::JSON->new->encode($frame->{json}) if $frame->{json};
+  $frame->{text} = encode_json($frame->{json}) if exists $frame->{json};
 
   # Raw text or binary
   if (exists $frame->{text}) { $frame = [1, 0, 0, 0, TEXT, $frame->{text}] }
@@ -98,10 +86,12 @@ sub build_message {
 
   # "permessage-deflate" extension
   return $self->build_frame(@$frame) unless $self->compressed;
-  my $deflate = $self->{deflate}
-    || Compress::Raw::Zlib::Deflate->new(WindowBits => -15, MemLevel => 8);
-  $self->{deflate} = $deflate if $self->context_takeover;
-  $deflate->deflate(\$frame->[5], my $out);
+  my $deflate = $self->{deflate} ||= Compress::Raw::Zlib::Deflate->new(
+    AppendOutput => 1,
+    MemLevel     => 8,
+    WindowBits   => -15
+  );
+  $deflate->deflate($frame->[5], my $out);
   $deflate->flush($out, Z_SYNC_FLUSH);
   @$frame[1, 5] = (1, substr($out, 0, length($out) - 4));
   return $self->build_frame(@$frame);
@@ -112,10 +102,8 @@ sub client_challenge {
 
   # "permessage-deflate" extension
   my $headers = $self->res->headers;
-  my $extensions = $headers->sec_websocket_extensions // '';
-  $self->context_takeover(0)
-    if $self->_deflate($extensions)
-    && $extensions =~ /client_no_context_takeover/i;
+  $self->compressed(1)
+    if ($headers->sec_websocket_extensions // '') =~ /permessage-deflate/;
 
   return _challenge($self->req->headers->sec_websocket_key) eq
     $headers->sec_websocket_accept;
@@ -128,8 +116,6 @@ sub client_handshake {
   $headers->upgrade('websocket')      unless $headers->upgrade;
   $headers->connection('Upgrade')     unless $headers->connection;
   $headers->sec_websocket_version(13) unless $headers->sec_websocket_version;
-  $headers->sec_websocket_extensions('permessage-deflate')
-    unless $headers->sec_websocket_extensions;
 
   # Generate 16 byte WebSocket challenge
   my $challenge = b64_encode sprintf('%16u', int(rand 9 x 16)), '';
@@ -159,64 +145,64 @@ sub kept_alive    { shift->handshake->kept_alive }
 sub local_address { shift->handshake->local_address }
 sub local_port    { shift->handshake->local_port }
 
+sub new {
+  my $self = shift->SUPER::new(@_);
+  $self->on(frame => sub { shift->_message(@_) });
+  return $self;
+}
+
 sub parse_frame {
   my ($self, $buffer) = @_;
 
   # Head
-  return undef unless length(my $clone = $$buffer) >= 2;
-  my $head = substr $clone, 0, 2;
+  return undef unless length $$buffer >= 2;
+  my ($first, $second) = unpack 'C*', substr($$buffer, 0, 2);
 
   # FIN
-  my $fin = (vec($head, 0, 8) & 0b10000000) == 0b10000000 ? 1 : 0;
+  my $fin = ($first & 0b10000000) == 0b10000000 ? 1 : 0;
 
   # RSV1-3
-  my $rsv1 = (vec($head, 0, 8) & 0b01000000) == 0b01000000 ? 1 : 0;
-  my $rsv2 = (vec($head, 0, 8) & 0b00100000) == 0b00100000 ? 1 : 0;
-  my $rsv3 = (vec($head, 0, 8) & 0b00010000) == 0b00010000 ? 1 : 0;
+  my $rsv1 = ($first & 0b01000000) == 0b01000000 ? 1 : 0;
+  my $rsv2 = ($first & 0b00100000) == 0b00100000 ? 1 : 0;
+  my $rsv3 = ($first & 0b00010000) == 0b00010000 ? 1 : 0;
 
   # Opcode
-  my $op = vec($head, 0, 8) & 0b00001111;
+  my $op = $first & 0b00001111;
   warn "-- Parsing frame ($fin, $rsv1, $rsv2, $rsv3, $op)\n" if DEBUG;
 
   # Small payload
-  my $len = vec($head, 1, 8) & 0b01111111;
-  my $hlen = 2;
+  my ($hlen, $len) = (2, $second & 0b01111111);
   if ($len < 126) { warn "-- Small payload ($len)\n" if DEBUG }
 
-  # Extended payload (16bit)
+  # Extended payload (16-bit)
   elsif ($len == 126) {
-    return undef unless length $clone > 4;
+    return undef unless length $$buffer > 4;
     $hlen = 4;
-    $len = unpack 'n', substr($clone, 2, 2);
-    warn "-- Extended 16bit payload ($len)\n" if DEBUG;
+    $len = unpack 'n', substr($$buffer, 2, 2);
+    warn "-- Extended 16-bit payload ($len)\n" if DEBUG;
   }
 
-  # Extended payload (64bit with 32bit fallback)
+  # Extended payload (64-bit with 32-bit fallback)
   elsif ($len == 127) {
-    return undef unless length $clone > 10;
+    return undef unless length $$buffer > 10;
     $hlen = 10;
-    my $ext = substr $clone, 2, 8;
+    my $ext = substr $$buffer, 2, 8;
     $len = MODERN ? unpack('Q>', $ext) : unpack('N', substr($ext, 4, 4));
-    warn "-- Extended 64bit payload ($len)\n" if DEBUG;
+    warn "-- Extended 64-bit payload ($len)\n" if DEBUG;
   }
 
   # Check message size
   $self->finish(1009) and return undef if $len > $self->max_websocket_size;
 
   # Check if whole packet has arrived
-  my $masked = vec($head, 1, 8) & 0b10000000;
-  return undef if length $clone < ($len + $hlen + ($masked ? 4 : 0));
-  substr $clone, 0, $hlen, '';
+  $len += 4 if my $masked = $second & 0b10000000;
+  return undef if length $$buffer < ($hlen + $len);
+  substr $$buffer, 0, $hlen, '';
 
   # Payload
-  $len += 4 if $masked;
-  return undef if length $clone < $len;
-  my $payload = $len ? substr($clone, 0, $len, '') : '';
-
-  # Unmask payload
+  my $payload = $len ? substr($$buffer, 0, $len, '') : '';
   $payload = xor_encode($payload, substr($payload, 0, 4, '') x 128) if $masked;
   warn "$payload\n" if DEBUG;
-  $$buffer = $clone;
 
   return [$fin, $rsv1, $rsv2, $rsv3, $op, $payload];
 }
@@ -259,10 +245,6 @@ sub server_handshake {
     and $res_headers->sec_websocket_protocol($1);
   $res_headers->sec_websocket_accept(
     _challenge($req_headers->sec_websocket_key));
-
-  # "permessage-deflate" extension
-  $res_headers->sec_websocket_extensions('permessage-deflate')
-    if $self->_deflate($req_headers->sec_websocket_extensions // '');
 }
 
 sub server_read {
@@ -287,9 +269,17 @@ sub server_write {
   return delete $self->{write} // '';
 }
 
-sub _challenge { b64_encode(sha1_bytes(($_[0] || '') . GUID), '') }
+sub with_compression {
+  my $self = shift;
 
-sub _deflate { $_[1] =~ /permessage-deflate/i && $_[0]->compressed(1) }
+  # "permessage-deflate" extension
+  $self->compressed(1)
+    and $self->res->headers->sec_websocket_extensions('permessage-deflate')
+    if ($self->req->headers->sec_websocket_extensions // '')
+    =~ /permessage-deflate/;
+}
+
+sub _challenge { b64_encode(sha1_bytes(($_[0] || '') . GUID), '') }
 
 sub _message {
   my ($self, $frame) = @_;
@@ -311,8 +301,8 @@ sub _message {
   # Append chunk and check message size
   $self->{op} = $op unless exists $self->{op};
   $self->{message} .= $frame->[5];
-  return $self->finish(1009)
-    if length $self->{message} > $self->max_websocket_size;
+  my $max = $self->max_websocket_size;
+  return $self->finish(1009) if length $self->{message} > $max;
 
   # No FIN bit (Continuation)
   return unless $frame->[0];
@@ -320,15 +310,17 @@ sub _message {
   # "permessage-deflate" extension (handshake and RSV1)
   my $msg = delete $self->{message};
   if ($self->compressed && $frame->[1]) {
-    my $inflate = $self->{inflate}
-      || Compress::Raw::Zlib::Inflate->new(WindowBits => -15);
-    $self->{inflate} = $inflate if $self->context_takeover;
-    $inflate->inflate(\($msg .= "\x00\x00\xff\xff"), my $out);
+    my $inflate = $self->{inflate} ||= Compress::Raw::Zlib::Inflate->new(
+      Bufsize     => $max,
+      LimitOutput => 1,
+      WindowBits  => -15
+    );
+    $inflate->inflate(($msg .= "\x00\x00\xff\xff"), my $out);
+    return $self->finish(1009) if length $msg;
     $msg = $out;
   }
 
-  $self->emit(json => Mojo::JSON->new->decode($msg))
-    if $self->has_subscribers('json');
+  $self->emit(json => j($msg)) if $self->has_subscribers('json');
   $op = delete $self->{op};
   $self->emit($op == TEXT ? 'text' : 'binary' => $msg);
   $self->emit(message => $op == TEXT ? decode('UTF-8', $msg) : $msg)
@@ -361,9 +353,9 @@ Mojo::Transaction::WebSocket - WebSocket transaction
 
 =head1 DESCRIPTION
 
-L<Mojo::Transaction::WebSocket> is a container for WebSocket transactions as
-described in RFC 6455. Note that 64bit frames require a Perl with support for
-quads or they are limited to 32bit.
+L<Mojo::Transaction::WebSocket> is a container for WebSocket transactions
+based on L<RFC 6455|http://tools.ietf.org/html/rfc6455>. Note that 64-bit
+frames require a Perl with support for quads or they are limited to 32-bit.
 
 =head1 EVENTS
 
@@ -485,14 +477,6 @@ L<Mojo::Transaction> and implements the following new ones.
 
 Compress messages with C<permessage-deflate> extension.
 
-=head2 context_takeover
-
-  my $bool = $ws->context_takeover;
-  $ws      = $ws->context_takeover($bool);
-
-Reuse LZ77 sliding window for C<permessage-deflate> extension, defaults to
-true.
-
 =head2 handshake
 
   my $handshake = $ws->handshake;
@@ -506,7 +490,7 @@ object.
   my $bool = $ws->masked;
   $ws      = $ws->masked($bool);
 
-Mask outgoing frames with XOR cipher and a random 32bit key.
+Mask outgoing frames with XOR cipher and a random 32-bit key.
 
 =head2 max_websocket_size
 
@@ -514,20 +498,12 @@ Mask outgoing frames with XOR cipher and a random 32bit key.
   $ws      = $ws->max_websocket_size(1024);
 
 Maximum WebSocket message size in bytes, defaults to the value of the
-MOJO_MAX_WEBSOCKET_SIZE environment variable or C<262144>.
+C<MOJO_MAX_WEBSOCKET_SIZE> environment variable or C<262144> (256KB).
 
 =head1 METHODS
 
 L<Mojo::Transaction::WebSocket> inherits all methods from
 L<Mojo::Transaction> and implements the following new ones.
-
-=head2 new
-
-  my $ws = Mojo::Transaction::WebSocket->new;
-
-Construct a new L<Mojo::Transaction::WebSocket> object and subscribe to
-L</"frame"> event with default message parser, which also handles C<PING> and
-C<CLOSE> frames automatically.
 
 =head2 build_frame
 
@@ -625,6 +601,14 @@ Local interface address.
 
 Local interface port.
 
+=head2 new
+
+  my $ws = Mojo::Transaction::WebSocket->new;
+
+Construct a new L<Mojo::Transaction::WebSocket> object and subscribe to
+L</"frame"> event with default message parser, which also handles C<PING> and
+C<CLOSE> frames automatically.
+
 =head2 parse_frame
 
   my $frame = $ws->parse_frame(\$bytes);
@@ -709,10 +693,16 @@ Read data server-side, used to implement web servers.
 
 Write data server-side, used to implement web servers.
 
+=head2 with_compression
+
+  $ws->with_compression;
+
+Negotiate C<permessage-deflate> extension for this WebSocket connection.
+
 =head1 DEBUGGING
 
-You can set the MOJO_WEBSOCKET_DEBUG environment variable to get some advanced
-diagnostics information printed to C<STDERR>.
+You can set the C<MOJO_WEBSOCKET_DEBUG> environment variable to get some
+advanced diagnostics information printed to C<STDERR>.
 
   MOJO_WEBSOCKET_DEBUG=1
 

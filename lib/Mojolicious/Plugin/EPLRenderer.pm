@@ -9,17 +9,8 @@ sub register { $_[1]->renderer->add_handler(epl => \&_epl) }
 sub _epl {
   my ($renderer, $c, $output, $options) = @_;
 
-  # Template
-  my $inline = $options->{inline};
-  my $path   = $renderer->template_path($options);
-  $path = md5_sum encode('UTF-8', $inline) if defined $inline;
-  return undef unless defined $path;
-
   # Cached
-  my $key   = delete $options->{cache} || $path;
-  my $cache = $renderer->cache;
-  my $mt    = $cache->get($key);
-  $mt ||= $cache->set($key => Mojo::Template->new)->get($key);
+  my $mt = delete $options->{'mojo.template'} || Mojo::Template->new;
   my $log = $c->app->log;
   if ($mt->compiled) {
     $log->debug("Rendering cached @{[$mt->name]}.");
@@ -28,33 +19,35 @@ sub _epl {
 
   # Not cached
   else {
+    my $inline = $options->{inline};
+    my $name = defined $inline ? md5_sum encode('UTF-8', $inline) : undef;
+    return undef unless defined($name //= $renderer->template_name($options));
 
     # Inline
     if (defined $inline) {
-      $log->debug('Rendering inline template.');
-      $$output = $mt->name('inline template')->render($inline, $c);
+      $log->debug(qq{Rendering inline template "$name".});
+      $$output = $mt->name(qq{inline template "$name"})->render($inline, $c);
     }
 
     # File
     else {
-      $mt->encoding($renderer->encoding) if $renderer->encoding;
-      return undef unless my $t = $renderer->template_name($options);
+      if (my $encoding = $renderer->encoding) { $mt->encoding($encoding) }
 
       # Try template
-      if (-r $path) {
-        $log->debug(qq{Rendering template "$t".});
-        $$output = $mt->name(qq{template "$t"})->render_file($path, $c);
+      if (defined(my $path = $renderer->template_path($options))) {
+        $log->debug(qq{Rendering template "$name".});
+        $$output = $mt->name(qq{template "$name"})->render_file($path, $c);
       }
 
       # Try DATA section
       elsif (my $d = $renderer->get_data_template($options)) {
-        $log->debug(qq{Rendering template "$t" from DATA section.});
+        $log->debug(qq{Rendering template "$name" from DATA section.});
         $$output
-          = $mt->name(qq{template "$t" from DATA section})->render($d, $c);
+          = $mt->name(qq{template "$name" from DATA section})->render($d, $c);
       }
 
       # No template
-      else { $log->debug(qq{Template "$t" not found.}) and return undef }
+      else { $log->debug(qq{Template "$name" not found.}) and return undef }
     }
   }
 
@@ -80,11 +73,14 @@ Mojolicious::Plugin::EPLRenderer - Embedded Perl Lite renderer plugin
 
 =head1 DESCRIPTION
 
-L<Mojolicious::Plugin::EPLRenderer> is a renderer for C<epl> templates. C<epl>
-templates are pretty much just raw L<Mojo::Template>.
+L<Mojolicious::Plugin::EPLRenderer> is a renderer for C<epl> templates, which
+are pretty much just raw L<Mojo::Template>.
 
 This is a core plugin, that means it is always enabled and its code a good
 example for learning to build new plugins, you're welcome to fork it.
+
+See L<Mojolicious::Plugins/"PLUGINS"> for a list of plugins that are available
+by default.
 
 =head1 METHODS
 

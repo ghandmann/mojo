@@ -10,7 +10,7 @@ has [qw(input output)] => sub { {} };
 sub AUTOLOAD {
   my $self = shift;
 
-  my ($package, $method) = our $AUTOLOAD =~ /^([\w:]+)::(\w+)$/;
+  my ($package, $method) = our $AUTOLOAD =~ /^(.+)::(.+)$/;
   croak "Undefined subroutine &${package}::$method called"
     unless blessed $self && $self->isa(__PACKAGE__);
 
@@ -18,8 +18,6 @@ sub AUTOLOAD {
     unless $self->validator->checks->{$method};
   return $self->check($method => @_);
 }
-
-sub DESTROY { }
 
 sub check {
   my ($self, $check) = (shift, shift);
@@ -31,9 +29,7 @@ sub check {
   my $input = $self->input->{$name};
   for my $value (ref $input eq 'ARRAY' ? @$input : $input) {
     next unless my $result = $self->$cb($name, $value, @_);
-    delete $self->output->{$name};
-    $self->{error}{$name} = [$check, $result, @_];
-    last;
+    return $self->error($name => [$check, $result, @_]);
   }
 
   return $self;
@@ -42,12 +38,23 @@ sub check {
 sub csrf_protect {
   my $self  = shift;
   my $token = $self->input->{csrf_token};
-  $self->{error}{csrf_token} = ['csrf_protect']
+  $self->error(csrf_token => ['csrf_protect'])
     unless $token && $token eq ($self->csrf_token // '');
   return $self;
 }
 
-sub error { shift->{error}{shift()} }
+sub error {
+  my $self = shift;
+
+  return sort keys %{$self->{error}} unless defined(my $name = shift);
+  return $self->{error}{$name} unless @_;
+  $self->{error}{$name} = shift;
+  delete $self->output->{$name};
+
+  return $self;
+}
+
+sub every_param { shift->_param(@_) }
 
 sub has_data { !!keys %{shift->input} }
 
@@ -70,20 +77,23 @@ sub param {
   my ($self, $name) = @_;
 
   # Multiple names
-  return map { scalar $self->param($_) } @$name if ref $name eq 'ARRAY';
+  return map { $self->param($_) } @$name if ref $name eq 'ARRAY';
 
   # List names
   return sort keys %{$self->output} unless defined $name;
 
-  my $value = $self->output->{$name};
-  my @values = ref $value eq 'ARRAY' ? @$value : ($value);
-  return wantarray ? @values : $values[0];
+  return $self->_param($name)->[-1];
 }
 
 sub required {
   my ($self, $name) = @_;
-  $self->{error}{$name} = ['required'] unless $self->optional($name)->is_valid;
-  return $self;
+  return $self if $self->optional($name)->is_valid;
+  return $self->error($name => ['required']);
+}
+
+sub _param {
+  return [] unless defined(my $value = shift->output->{shift()});
+  return [ref $value eq 'ARRAY' ? @$value : $value];
 }
 
 1;
@@ -117,8 +127,8 @@ L<Mojolicious::Validator::Validation> implements the following attributes.
 
 =head2 csrf_token
 
-  my $token   = $validation->token;
-  $validation = $validation->token('fa6a08...');
+  my $token   = $validation->csrf_token;
+  $validation = $validation->csrf_token('fa6a08...');
 
 CSRF token.
 
@@ -170,12 +180,24 @@ Validate C<csrf_token> and protect from cross-site request forgery.
 
 =head2 error
 
-  my $err = $validation->error('foo');
+  my @names   = $validation->error;
+  my $err     = $validation->error('foo');
+  $validation = $validation->error(foo => ['custom_check']);
 
-Return details about failed validation check, at any given time there can only
-be one per field.
+Get or set details for failed validation check, at any given time there can
+only be one per field.
 
   my ($check, $result, @args) = @{$validation->error('foo')};
+
+=head2 every_param
+
+  my $values = $validation->every_param('foo');
+
+Similar to L</"param">, but returns all values sharing the same name as an
+array reference.
+
+  # Get first value
+  my $first = $validation->every_param('foo')->[0];
 
 =head2 has_data
 
@@ -206,12 +228,13 @@ Change validation L</"topic">.
 
 =head2 param
 
-  my @names       = $c->param;
-  my $foo         = $c->param('foo');
-  my @foo         = $c->param('foo');
-  my ($foo, $bar) = $c->param(['foo', 'bar']);
+  my @names       = $validation->param;
+  my $value       = $validation->param('foo');
+  my ($foo, $bar) = $validation->param(['foo', 'bar']);
 
-Access validated parameters, similar to L<Mojolicious::Controller/"param">.
+Access validated parameters. If there are multiple values sharing the same
+name, and you want to access more than just the last one, you can use
+L</"every_param">.
 
 =head2 required
 
@@ -220,11 +243,11 @@ Access validated parameters, similar to L<Mojolicious::Controller/"param">.
 Change validation L</"topic"> and make sure a value is present and not an
 empty string.
 
-=head1 CHECKS
+=head1 AUTOLOAD
 
-In addition to the methods above, you can also call validation checks provided
-by L<Mojolicious::Validator> on L<Mojolicious::Validator::Validation> objects,
-similar to L</"check">.
+In addition to the L</"ATTRIBUTES"> and L</"METHODS"> above, you can also call
+validation checks provided by L</"validator"> on
+L<Mojolicious::Validator::Validation> objects, similar to L</"check">.
 
   $validation->required('foo')->size(2, 5)->like(qr/^[A-Z]/);
   $validation->optional('bar')->equal_to('foo');

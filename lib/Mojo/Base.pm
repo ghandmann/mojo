@@ -11,6 +11,9 @@ use Carp ();
 # Only Perl 5.14+ requires it on demand
 use IO::Handle ();
 
+# Protect subclasses using AUTOLOAD
+sub DESTROY { }
+
 sub import {
   my $class = shift;
   return unless my $flag = shift;
@@ -40,14 +43,9 @@ sub import {
   feature->import(':5.10');
 }
 
-sub new {
-  my $class = shift;
-  bless @_ ? @_ > 1 ? {@_} : {%{$_[0]}} : {}, ref $class || $class;
-}
-
 sub attr {
-  my ($class, $attrs, $default) = @_;
-  return unless ($class = ref $class || $class) && $attrs;
+  my ($self, $attrs, $default) = @_;
+  return unless (my $class = ref $self || $self) && $attrs;
 
   Carp::croak 'Default has to be a code reference or constant value'
     if ref $default && ref $default ne 'CODE';
@@ -72,15 +70,17 @@ sub attr {
       $code .= ref $default eq 'CODE' ? '$default->($_[0]);' : '$default;';
     }
 
-    # Store value
-    $code .= "\n  }\n  \$_[0]{'$attr'} = \$_[1];\n";
-
-    # Footer (return invocant)
-    $code .= "  \$_[0];\n}";
+    # Footer (store value and return invocant)
+    $code .= "\n  }\n  \$_[0]{'$attr'} = \$_[1];\n  \$_[0];\n}";
 
     warn "-- Attribute $attr in $class\n$code\n\n" if $ENV{MOJO_BASE_DEBUG};
     Carp::croak "Mojo::Base error: $@" unless eval "$code;1";
   }
+}
+
+sub new {
+  my $class = shift;
+  bless @_ ? @_ > 1 ? {@_} : {%{$_[0]}} : {}, ref $class || $class;
 }
 
 sub tap {
@@ -162,8 +162,8 @@ All three forms save a lot of typing.
 
 =head1 FUNCTIONS
 
-L<Mojo::Base> exports the following functions if imported with the C<-base>
-flag or a base class.
+L<Mojo::Base> implements the following functions, which can be imported with
+the C<-base> flag or by setting a base class.
 
 =head2 has
 
@@ -180,24 +180,15 @@ Create attributes for hash-based objects, just like the L</"attr"> method.
 
 L<Mojo::Base> implements the following methods.
 
-=head2 new
-
-  my $object = BaseSubClass->new;
-  my $object = BaseSubClass->new(name => 'value');
-  my $object = BaseSubClass->new({name => 'value'});
-
-This base class provides a basic constructor for hash-based objects. You can
-pass it either a hash or a hash reference with attribute values.
-
 =head2 attr
 
   $object->attr('name');
-  BaseSubClass->attr('name');
-  BaseSubClass->attr([qw(name1 name2 name3)]);
-  BaseSubClass->attr(name => 'foo');
-  BaseSubClass->attr(name => sub {...});
-  BaseSubClass->attr([qw(name1 name2 name3)] => 'foo');
-  BaseSubClass->attr([qw(name1 name2 name3)] => sub {...});
+  SubClass->attr('name');
+  SubClass->attr([qw(name1 name2 name3)]);
+  SubClass->attr(name => 'foo');
+  SubClass->attr(name => sub {...});
+  SubClass->attr([qw(name1 name2 name3)] => 'foo');
+  SubClass->attr([qw(name1 name2 name3)] => sub {...});
 
 Create attribute accessor for hash-based objects, an array reference can be
 used to create more than one at a time. Pass an optional second argument to
@@ -205,6 +196,15 @@ set a default value, it should be a constant or a callback. The callback will
 be executed at accessor read time if there's no set value. Accessors can be
 chained, that means they return their invocant when they are called with an
 argument.
+
+=head2 new
+
+  my $object = SubClass->new;
+  my $object = SubClass->new(name => 'value');
+  my $object = SubClass->new({name => 'value'});
+
+This base class provides a basic constructor for hash-based objects. You can
+pass it either a hash or a hash reference with attribute values.
 
 =head2 tap
 
@@ -216,7 +216,7 @@ and is also available as C<$_>.
 
 =head1 DEBUGGING
 
-You can set the MOJO_BASE_DEBUG environment variable to get some advanced
+You can set the C<MOJO_BASE_DEBUG> environment variable to get some advanced
 diagnostics information printed to C<STDERR>.
 
   MOJO_BASE_DEBUG=1

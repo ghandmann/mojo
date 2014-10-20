@@ -4,6 +4,7 @@ use Mojo::Base -base;
 use Mojo::Cookie::Request;
 use Mojo::Path;
 
+has extracting      => 1;
 has max_cookie_size => 4096;
 
 sub add {
@@ -25,7 +26,7 @@ sub add {
     next unless my $path = $cookie->path;
     next unless length(my $name = $cookie->name // '');
     my $jar = $self->{jar}{$domain} ||= [];
-    @$jar = (grep({_compare($_, $path, $name, $origin)} @$jar), $cookie);
+    @$jar = (grep({ _compare($_, $path, $name, $origin) } @$jar), $cookie);
   }
 
   return $self;
@@ -36,10 +37,13 @@ sub all {
   return map { @{$jar->{$_}} } sort keys %$jar;
 }
 
-sub empty { shift->{jar} = {} }
+sub empty { delete shift->{jar} }
 
 sub extract {
   my ($self, $tx) = @_;
+
+  return unless $self->extracting;
+
   my $url = $tx->req->url;
   for my $cookie (@{$tx->res->cookies}) {
 
@@ -138,19 +142,28 @@ Mojo::UserAgent::CookieJar - Cookie jar for HTTP user agents
 
 =head1 DESCRIPTION
 
-L<Mojo::UserAgent::CookieJar> is a minimalistic and relaxed cookie jar based
-on RFC 6265 for L<Mojo::UserAgent>.
+L<Mojo::UserAgent::CookieJar> is a minimalistic and relaxed cookie jar used by
+L<Mojo::UserAgent> and based on
+L<RFC 6265|http://tools.ietf.org/html/rfc6265>.
 
 =head1 ATTRIBUTES
 
 L<Mojo::UserAgent::CookieJar> implements the following attributes.
+
+=head2 extracting
+
+  my $bool = $jar->extracting;
+  $jar     = $jar->extracting($bool);
+
+Allow L</"extract"> to L</"add"> new cookies to the jar, defaults to a true
+value.
 
 =head2 max_cookie_size
 
   my $size = $jar->max_cookie_size;
   $jar     = $jar->max_cookie_size(4096);
 
-Maximum cookie size in bytes, defaults to C<4096>.
+Maximum cookie size in bytes, defaults to C<4096> (4KB).
 
 =head1 METHODS
 

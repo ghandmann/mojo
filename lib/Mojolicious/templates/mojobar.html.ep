@@ -1,6 +1,6 @@
 %= javascript '/mojo/jquery/jquery.js'
 <div id="mojobar">
-  %= stylesheet scoped => 'scoped', begin
+  <style scoped="scoped">
     #mojobar {
       background-color: #1a1a1a;
       background: -webkit-linear-gradient(top, #2a2a2a 0%, #000 100%);
@@ -45,7 +45,8 @@
     }
     #mojobar-links input:focus { outline: 0 }
     #mojobar-links form { display: inline }
-  % end
+    .animated { transition: top 0.2s ease-in-out }
+  </style>
   <div id="mojobar-logo">
     %= link_to 'http://mojolicio.us' => begin
       %= image '/mojo/logo-white.png', alt => 'Mojolicious logo'
@@ -55,52 +56,68 @@
     %= link_to Documentation => 'http://mojolicio.us/perldoc'
     %= link_to Wiki => 'https://github.com/kraih/mojo/wiki'
     %= link_to GitHub => 'https://github.com/kraih/mojo'
-    %= link_to CPAN => 'http://metacpan.org/release/Mojolicious/'
-    %= link_to MailingList => 'http://groups.google.com/group/mojolicious'
+    %= link_to CPAN => 'https://metacpan.org/release/Mojolicious/'
+    %= link_to MailingList => 'https://groups.google.com/group/mojolicious'
     %= link_to Blog => 'http://blog.kraih.com'
-    %= link_to Twitter => 'http://twitter.com/kraih'
-    %= form_for 'http://google.com/cse' => (target => '_blank') => begin
+    %= link_to Twitter => 'https://twitter.com/kraih'
+    %= form_for 'https://www.google.com/cse' => (target => '_blank') => begin
       %= hidden_field cx => '014527573091551588235:pwfplkjpgbi'
       %= hidden_field ie => 'UTF-8'
       %= search_field 'q', placeholder => 'Search'
     %= end
   </div>
 </div>
-%= javascript begin
+<script>
+  var mojobar = $('#mojobar');
+  var mojobarHeight = mojobar.outerHeight();
+  function fixOffset() {
+    var offset = $(window.location.hash).offset();
+    if (offset) {
+      $('html, body').animate({scrollTop: offset.top - mojobarHeight}, 1);
+    }
+  }
   $(window).load(function () {
     if (window.location.hash) {
-      var tweak = $(window.location.hash).offset().top - 50;
-      $('html, body').animate({scrollTop:tweak}, 1);
+      fixOffset();
     }
-    var mojobar = $('#mojobar');
-    var start   = mojobar.offset().top;
+    var start = mojobar.offset().top;
     var fixed;
+    var lastScrollTop = start;
     $(window).scroll(function () {
-      if (!fixed && (mojobar.offset().top - $(window).scrollTop() < 0)) {
-        mojobar.css('top', 0);
-        mojobar.css('position', 'fixed');
+      var st = $(window).scrollTop();
+      if (!fixed && st > start) {
         fixed = true;
-      } else if (fixed && $(window).scrollTop() <= start) {
-        mojobar.css('position', 'absolute');
-        mojobar.css('top', start + 'px');
+        mojobar.css('position', 'fixed').css('top', 0);
+      } else if (fixed && st <= start) {
         fixed = false;
+        mojobar.removeClass('animated');
+        mojobar.css('position', 'absolute').css('top', start + 'px');
+      }
+      else if (fixed && (Math.abs(lastScrollTop - st) > 100)) {
+        if (!mojobar.hasClass('animated')) {
+          mojobar.addClass('animated');
+        }
+        if (st > lastScrollTop && st > (mojobarHeight + start + 250)) {
+          mojobar.css('top', 0 - (mojobarHeight + 5));
+        } else if (st + $(window).height() < $(document).height()) {
+          mojobar.css('top', 0);
+        }
+        lastScrollTop = st;
       }
     });
   });
-  $(document).ready(function() {
+  $(document).ready(function () {
     $('a[href^="#"]').addClass('mojoscroll');
     $(".mojoscroll").click(function(e) {
       e.preventDefault();
       e.stopPropagation();
-      var parts  = this.href.split("#");
-      var hash   = "#" + parts[1];
+      var hash   = "#" + this.href.split("#")[1];
       var target = $(hash);
-      var top    = target.offset().top - 50;
       var old    = target.attr('id');
       target.attr('id', '');
       location.hash = hash;
       target.attr('id', old);
-      $('html, body').animate({scrollTop:top}, 1);
+      fixOffset();
     });
   });
-% end
+</script>
